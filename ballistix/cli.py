@@ -4,6 +4,8 @@ ballistix/cli.py — Point d'entrée CLI, auto-élévation sudo,
 interface graphique Tkinter, et dispatch des arguments.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import glob
@@ -12,8 +14,22 @@ import datetime
 import subprocess
 import shutil
 import argparse
-import tkinter as tk
-from tkinter import colorchooser, messagebox, ttk
+
+# Tkinter est optionnel : le daemon (ballistixd.py) et les modes CLI
+# (--diagnostic, --scan-all, --web, etc.) n'en ont pas besoin.
+# On importe conditionnellement pour permettre l'usage du package
+# sur des systèmes headless sans tkinter installé.
+TKINTER_AVAILABLE = False
+try:
+    import tkinter as tk
+    from tkinter import colorchooser, messagebox, ttk
+    TKINTER_AVAILABLE = True
+except ImportError:
+    tk = None  # type: ignore[assignment]
+    colorchooser = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
+    ttk = None  # type: ignore[assignment]
+
 from typing import List, Tuple, Optional
 
 from smbus2 import SMBus
@@ -946,6 +962,14 @@ Exemples :
         return
 
     print("🖥️  Lancement de l'interface graphique...")
+
+    if not TKINTER_AVAILABLE:
+        no_tk_msg = "Tkinter n'est pas disponible (module tkinter non installé)."
+        print(f"  {warn(no_tk_msg)}")
+        print(f"  {info('Utilisez --diagnostic, --scan-all ou --web pour le mode CLI/serveur.')}")
+        print()
+        print("✅ Terminé.")
+        return
 
     display_warning = "Pas d'affichage graphique disponible ($DISPLAY non defini)."
     cli_hint = "Utilisez --diagnostic ou --scan-all pour le mode CLI."
