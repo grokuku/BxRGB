@@ -1,0 +1,21 @@
+[Unit]
+Description=Ballistix RGB LED Controller Daemon
+After=systemd-modules-load.service
+# Le module i2c-dev doit être chargé avant
+Requires=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ballistixd --host 0.0.0.0 --port 8080 --add-device 9:0x20
+# Config persistée dans le home de l'utilisateur
+Environment=HOME=/home/holaf
+# Redémarrage automatique en cas de crash
+Restart=on-failure
+RestartSec=3
+# Logs visibles avec journalctl -u ballistix-rgb
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ballistix-rgb
+
+[Install]
+WantedBy=multi-user.target

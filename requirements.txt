@@ -1,0 +1,26 @@
+# smbus2 pour l'accès SMBus/I2C
+smbus2>=0.4.0
+
+# Serveur web FastAPI + Uvicorn
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# Validation Pydantic (inclus avec FastAPI)
+pydantic>=2.0.0
+
+# Note : tkinter est inclus avec la bibliothèque standard Python.
+#        Sur certaines distributions Linux, l'interface graphique
+#        est dans un paquet séparé à installer via le gestionnaire
+#        de paquets système :
+#
+#   Debian / Ubuntu / Linux Mint :
+#       sudo apt install python3-tk
+#
+#   Fedora / RHEL / Centros :
+#       sudo dnf install python3-tkinter
+#
+#   Arch Linux / Manjaro / EndeavourOS :
+#       sudo pacman -S tk
+#
+#   openSUSE :
+#       sudo zypper install python3-tk

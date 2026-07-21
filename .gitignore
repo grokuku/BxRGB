@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Conda / venv
+env/
+.venv/
+venv/
+
+# Logs & dumps
+ballistix_scanall_*.txt
+*.log
+
+# Config locale (ne pas committer la config utilisateur)
+# ~/.config/ballistix/ est hors du repo de toute façon
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~

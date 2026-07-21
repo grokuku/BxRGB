@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ballistix RGB Controller</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23e94560'/%3E%3Ccircle cx='16' cy='16' r='8' fill='%23fff' opacity='0.9'/%3E%3C/svg%3E">
+</head>
+<body>
+
+  <!-- ════════════════════════ HEADER ════════════════════ -->
+  <header class="header">
+    <div class="header-title">
+      <!-- Icône mémoire -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="2" width="16" height="20" rx="2" ry="2"/>
+        <line x1="9" y1="6" x2="9" y2="10"/>
+        <line x1="15" y1="6" x2="15" y2="10"/>
+        <line x1="9" y1="14" x2="9" y2="18"/>
+        <line x1="15" y1="14" x2="15" y2="18"/>
+      </svg>
+      Ballistix RGB Controller
+    </div>
+    <div class="header-actions">
+      <div class="connection-indicator">
+        <span class="status-dot disconnected" id="status-dot"></span>
+        <span id="status-text">Déconnecté</span>
+        <span id="connection-mode" style="font-size:0.75rem;background:rgba(0,0,0,0.2);padding:2px 8px;border-radius:4px;color:rgba(255,255,255,0.6)"></span>
+      </div>
+      <button id="toggle-orientation" class="btn-icon" title="Basculer orientation">↔</button>
+      <button id="btn-toggle-mode" class="btn-icon" title="Basculer mode matrice">⊞</button>
+      <span id="mode-indicator" class="badge">Mode classique</span>
+      <button class="btn btn-secondary" id="btn-rescan">
+        🔄 Re-scan
+      </button>
+    </div>
+  </header>
+
+  <!-- ════════════════════════ MAIN ═════════════════════ -->
+  <div class="main-content">
+
+    <!-- ─── PANEL GAUCHE : Canvas ────────────────────── -->
+    <div class="left-panel">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">💡 Prévisualisation des LEDs</span>
+        </div>
+        <div class="canvas-container">
+          <div class="canvas-wrapper">
+            <canvas id="led-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📐 Disposition des sticks</span>
+          <span style="font-size:0.8rem;color:var(--text-dim);">Glissez-déposez pour réorganiser</span>
+        </div>
+        <!-- Drag & Drop Container -->
+        <div class="dnd-container" id="dnd-container"></div>
+        <!-- Empty State -->
+        <div class="empty-state hidden" id="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="2" width="20" height="20" rx="2" ry="2"/>
+            <line x1="2" y1="10" x2="22" y2="10"/>
+            <line x1="10" y1="2" x2="10" y2="22"/>
+          </svg>
+          <h3>Aucun stick détecté</h3>
+          <p>Assurez-vous que les barrettes Ballistix sont bien installées et cliquez sur "Re-scan".</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── PANEL DROIT : Contrôles ──────────────────── -->
+    <div class="right-panel">
+
+      <!-- Infos sur la sélection (sans la liste des sticks) -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">🎯 Sélection</span>
+        </div>
+        <div class="led-info" id="led-info">
+          Cliquez sur une LED dans le canvas
+        </div>
+      </div>
+
+      <!-- Color Picker -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">🎨 Couleur</span>
+        </div>
+        <div class="color-picker-section">
+          <div class="color-picker-row">
+            <input type="color" id="color-picker" value="#ffffff" title="Choisir une couleur">
+            <span class="color-hex" id="color-hex">#ffffff</span>
+          </div>
+          <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.25rem;">
+            Couleurs rapides — <em>Ctrl+click</em> pour tout le système
+          </div>
+          <div class="quick-colors" id="quick-colors"></div>
+        </div>
+      </div>
+
+      <!-- Animation Controls -->
+      <div class="card" id="animation-controls">
+        <h3>🎬 Animation</h3>
+        <div class="animation-row">
+          <button id="btn-anim-start" class="btn-primary">🔥 Incandescence</button>
+          <button id="btn-anim-rainbow" class="btn-primary" style="margin-left:4px">🌈 Rainbow</button>
+          <button id="btn-anim-stop" class="btn-secondary" disabled>⏹ Arrêter</button>
+        </div>
+        <div class="animation-row">
+          <label>Vitesse : <span id="anim-speed-value">1.0×</span></label>
+          <input type="range" id="anim-speed" min="0.05" max="5.0" step="0.05" value="1.0">
+        </div>
+        <div class="animation-row">
+          <label>Refresh SMBus : <span id="anim-refresh-value">20/s</span></label>
+          <input type="range" id="anim-refresh" min="1" max="30" step="1" value="20">
+        </div>
+      </div>
+
+      <!-- Brightness -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">☀️ Luminosité</span>
+        </div>
+        <div class="brightness-section">
+          <div class="brightness-row">
+            <div class="brightness-label">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="5"/>
+                <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+              </svg>
+              Luminosité
+            </div>
+            <input type="range" id="brightness-slider" min="0" max="255" value="255">
+            <span class="brightness-value" id="brightness-value">255</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ════════════════════════ FOOTER ═══════════════════ -->
+  <footer class="footer">
+    <button class="btn btn-danger" id="btn-reset-all">🔴 Reset All (éteindre)</button>
+    <button class="btn btn-secondary" id="btn-sync">🔄 Sync</button>
+  </footer>
+
+  <!-- ════════════════════ TOAST CONTAINER ════════════════ -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- ════════════════════════ SCRIPTS ═══════════════════ -->
+  <script src="js/colors.js"></script>
+  <script src="js/canvas.js"></script>
+  <script src="js/dnd.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>
