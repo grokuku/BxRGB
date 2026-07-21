@@ -11,9 +11,16 @@ Usage :
 import asyncio
 import json
 import os
+import re
+import stat
+import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import threading
+import urllib.request
+import urllib.error
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 
@@ -23,6 +30,13 @@ from pydantic import BaseModel
 
 from .core import CrucialStick, ok, fail, warn
 from .detect import detect_sticks
+
+# ── Version du daemon (pour l'auto-update) ───────────────────
+DAEMON_VERSION = "0.0.1"
+GITHUB_REPO = "grokuku/BxRGB"
+BINARY_PATH = "/usr/local/bin/ballistixd"
+SERVICE_NAME = "ballistix-rgb"
+GITHUB_TIMEOUT = 15  # secondes
 
 # ── Modèles Pydantic ──────────────────────────────────────────
 
@@ -536,6 +550,7 @@ async def get_status():
     return {
         "status": "running",
         "uptime": time.time(),
+        "version": DAEMON_VERSION,
         "sticks_count": len(sticks),
         "sticks": sticks,
     }
@@ -726,6 +741,233 @@ async def set_animation_refresh(body: dict = {}):
     rate = body.get("rate", 20)
     smbus.set_smbus_refresh_rate(rate)
     return {"status": "ok", "rate": rate}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Routes Auto-Update
+# ═══════════════════════════════════════════════════════════════
+
+def _fetch_github_release() -> dict:
+    """Récupère la dernière release via l'API GitHub.
+
+    Returns:
+        dict: réponse JSON de l'API GitHub (tag_name, assets, ...)
+
+    Raises:
+        HTTPException: si la requête échoue.
+    """
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "BxRGB-Updater",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise HTTPException(404, "Aucune release GitHub trouvée")
+        raise HTTPException(502, f"Erreur API GitHub: HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise HTTPException(502, f"Impossible de joindre GitHub: {e.reason}")
+    except Exception as e:
+        raise HTTPException(500, f"Erreur lors de la récupération de la release: {e}")
+
+
+def _parse_version(tag: str) -> str:
+    """Extrait le numéro de version depuis un tag (ex: 'v0.0.2' → '0.0.2')."""
+    return tag.lstrip("vV").strip()
+
+
+def _version_tuple(v: str) -> tuple:
+    """Convertit une version string en tuple comparable (ex: '0.0.2' → (0, 0, 2))."""
+    parts = re.split(r'[.\-]', v)
+    result = []
+    for p in parts:
+        try:
+            result.append(int(p))
+        except ValueError:
+            result.append(0)
+    return tuple(result)
+
+
+@app.get("/api/update/check")
+async def update_check():
+    """Vérifie si une mise à jour est disponible sur GitHub.
+
+    Ne télécharge rien — compare seulement la version actuelle
+    avec la dernière release publiée.
+    """
+    release = _fetch_github_release()
+    latest_tag = release.get("tag_name", "")
+    latest_version = _parse_version(latest_tag)
+    current_version = DAEMON_VERSION
+
+    update_available = _version_tuple(latest_version) > _version_tuple(current_version)
+
+    return {
+        "current": current_version,
+        "latest": latest_version,
+        "update_available": update_available,
+    }
+
+
+@app.post("/api/update")
+async def perform_update():
+    """Télécharge et installe la dernière release GitHub.
+
+    Étapes:
+    1. Récupère la dernière release GitHub
+    2. Vérifie si une mise à jour est nécessaire
+    3. Télécharge l'asset tar.gz contenant le binaire ballistixd
+    4. Extrait le binaire vers un fichier temporaire
+    5. Remplace atomiquement /usr/local/bin/ballistixd
+    6. Redémarre le service systemd ballistix-rgb
+
+    En cas d'échec à any étape, le binaire existant n'est pas touché.
+    """
+    # ── 1. Récupérer la dernière release ──
+    release = _fetch_github_release()
+    latest_tag = release.get("tag_name", "")
+    latest_version = _parse_version(latest_tag)
+    current_version = DAEMON_VERSION
+
+    # ── 2. Vérifier si une update est nécessaire ──
+    if _version_tuple(latest_version) <= _version_tuple(current_version):
+        return {
+            "status": "up-to-date",
+            "current": current_version,
+            "latest": latest_version,
+        }
+
+    # ── 3. Trouver l'asset tar.gz ──
+    assets = release.get("assets", [])
+    download_url = None
+    for asset in assets:
+        name = asset.get("name", "")
+        if name.startswith("bxrgb-") and name.endswith(".tar.gz"):
+            download_url = asset.get("browser_download_url")
+            break
+
+    if not download_url:
+        raise HTTPException(
+            404,
+            "Aucun asset 'bxrgb-*.tar.gz' trouvé dans la dernière release",
+        )
+
+    # ── 4. Télécharger le tar.gz ──
+    try:
+        dl_req = urllib.request.Request(download_url, headers={
+            "User-Agent": "BxRGB-Updater",
+        })
+        with urllib.request.urlopen(dl_req, timeout=GITHUB_TIMEOUT) as resp:
+            tar_data = resp.read()
+    except Exception as e:
+        raise HTTPException(502, f"Échec du téléchargement: {e}")
+
+    # ── 5. Extraire le binaire ballistixd du tar.gz ──
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="bxrgb_update_")
+        tar_path = os.path.join(tmp_dir, "release.tar.gz")
+        with open(tar_path, "wb") as f:
+            f.write(tar_data)
+
+        # Extraire et chercher le binaire ballistixd
+        extracted_binary = None
+        with tarfile.open(tar_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                # Chercher un fichier nommé ballistixd (à la racine ou dans un sous-dossier)
+                member_name = os.path.basename(member.name)
+                if member_name == "ballistixd" and member.isfile():
+                    tar.extract(member, path=tmp_dir)
+                    extracted_binary = os.path.join(tmp_dir, member.name)
+                    break
+
+        if not extracted_binary or not os.path.isfile(extracted_binary):
+            raise HTTPException(
+                500,
+                "Binaire 'ballistixd' introuvable dans l'archive tar.gz",
+            )
+
+        # ── 6. Remplacer le binaire atomiquement ──
+        if not os.path.isdir(os.path.dirname(BINARY_PATH)):
+            raise HTTPException(500, f"Dossier {os.path.dirname(BINARY_PATH)} introuvable")
+
+        new_path = BINARY_PATH + ".new"
+
+        # Copier le binaire extrait vers new_path
+        import shutil
+        shutil.copy2(extracted_binary, new_path)
+
+        # chmod +x
+        os.chmod(new_path, os.stat(new_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        # Remplacement atomique
+        os.replace(new_path, BINARY_PATH)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Nettoyer le .new s'il existe — ne jamais corrompre le binaire actuel
+        new_path = BINARY_PATH + ".new"
+        try:
+            if os.path.exists(new_path):
+                os.remove(new_path)
+        except Exception:
+            pass
+        raise HTTPException(500, f"Échec de l'installation du binaire: {e}")
+    finally:
+        # Nettoyer le dossier temporaire
+        if tmp_dir:
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+
+    # ── 7. Redémarrer le service systemd ──
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise HTTPException(
+                500,
+                f"Binaire mis à jour mais échec du redémarrage du service "
+                f"'{SERVICE_NAME}': {stderr or 'erreur inconnue'}",
+            )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            504,
+            f"Binaire mis à jour mais timeout lors du redémarrage du service "
+            f"'{SERVICE_NAME}'. Le service devrait redémarrer automatiquement.",
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            500,
+            "systemctl introuvable — le binaire a été mis à jour mais le service "
+            "n'a pas pu être redémarré automatiquement. Redémarrez manuellement.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            500,
+            f"Binaire mis à jour mais erreur lors du redémarrage: {e}",
+        )
+
+    return {
+        "status": "updated",
+        "current": current_version,
+        "latest": latest_version,
+        "message": f"Mis à jour de {current_version} → {latest_version}. Service redémarré.",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

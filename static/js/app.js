@@ -555,6 +555,195 @@ async function apiRescan() {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   Auto-Update
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Affiche le modal d'update et gère tout le flux.
+ * @param {string} stepId - ID de l'étape à activer
+ * @param {'active'|'done'|'error'} state
+ */
+function setUpdateStep(stepId, state) {
+  const step = document.getElementById(stepId);
+  if (!step) return;
+  step.classList.remove('hidden', 'active', 'done', 'error');
+  if (state) step.classList.add(state);
+}
+
+/** Affiche le modal d'update. */
+function showUpdateModal(title) {
+  const overlay = document.getElementById('update-overlay');
+  const titleEl = document.getElementById('update-modal-title');
+  if (titleEl) titleEl.textContent = title || '⬇ Mise à jour';
+  if (overlay) overlay.classList.remove('hidden');
+}
+
+/** Cache le modal d'update. */
+function hideUpdateModal() {
+  const overlay = document.getElementById('update-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  // Réinitialiser les étapes
+  ['update-step-check', 'update-step-download', 'update-step-install',
+   'update-step-restart', 'update-step-reconnect'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
+  });
+}
+
+/** Ajoute un message d'erreur dans le modal. */
+function showUpdateError(message) {
+  const body = document.getElementById('update-modal-body');
+  if (!body) return;
+  // Retirer l'ancienne erreur
+  const oldErr = body.querySelector('.update-step.error-msg');
+  if (oldErr) oldErr.remove();
+  const errEl = document.createElement('div');
+  errEl.className = 'update-step error error-msg';
+  errEl.innerHTML = `<span class="update-step-icon">⚠</span><span>${message}</span>`;
+  body.appendChild(errEl);
+}
+
+/** Ajoute un message de succès dans le modal. */
+function showUpdateSuccess(message) {
+  const body = document.getElementById('update-modal-body');
+  if (!body) return;
+  const oldMsg = body.querySelector('.update-step.success-msg');
+  if (oldMsg) oldMsg.remove();
+  const msgEl = document.createElement('div');
+  msgEl.className = 'update-step done success-msg';
+  msgEl.innerHTML = `<span class="update-step-icon">✅</span><span>${message}</span>`;
+  body.appendChild(msgEl);
+}
+
+/**
+ * Tente de se reconnecter au serveur après une mise à jour.
+ * Recharge la page quand la connexion est rétablie.
+ * @param {number} maxAttempts - nombre max de tentatives
+ * @param {number} interval - ms entre les tentatives
+ */
+function reconnectAfterUpdate(maxAttempts = 30, interval = 2000) {
+  let attempts = 0;
+
+  function tryReconnect() {
+    attempts++;
+    console.log(`🔁 Tentative de reconnexion ${attempts}/${maxAttempts}...`);
+
+    fetch('/api/status', { signal: AbortSignal.timeout(3000) })
+      .then(resp => {
+        if (resp.ok) {
+          console.log('✅ Serveur de nouveau accessible ! Rechargement...');
+          showUpdateSuccess('Serveur reconnecté ! Rechargement de la page...');
+          setTimeout(() => window.location.reload(), 1500);
+        } else {
+          if (attempts < maxAttempts) {
+            setTimeout(tryReconnect, interval);
+          } else {
+            showUpdateError('Le serveur ne répond pas après plusieurs tentatives. Rechargez la page manuellement.');
+          }
+        }
+      })
+      .catch(() => {
+        if (attempts < maxAttempts) {
+          setTimeout(tryReconnect, interval);
+        } else {
+          showUpdateError('Impossible de se reconnecter au serveur. Rechargez la page manuellement.');
+        }
+      });
+  }
+
+  setTimeout(tryReconnect, interval);
+}
+
+/**
+ * Lance le processus de mise à jour complet.
+ */
+async function performUpdate() {
+  showUpdateModal('⬇ Mise à jour');
+
+  // ── Étape 1: Vérification ──
+  setUpdateStep('update-step-check', 'active');
+
+  let checkData;
+  try {
+    const resp = await fetch('/api/update/check');
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(text || `HTTP ${resp.status}`);
+    }
+    checkData = await resp.json();
+  } catch (err) {
+    setUpdateStep('update-step-check', 'error');
+    showUpdateError('Échec de la vérification: ' + err.message);
+    return;
+  }
+
+  setUpdateStep('update-step-check', 'done');
+
+  if (!checkData.update_available) {
+    showUpdateSuccess(`Déjà à jour (v${checkData.current})`);
+    toast('✅ Déjà à jour (v' + checkData.current + ')', 'success');
+    setTimeout(hideUpdateModal, 2500);
+    return;
+  }
+
+  // ── Demander confirmation ──
+  const confirmed = confirm(
+    `Une mise à jour est disponible !\n\n` +
+    `Version actuelle : v${checkData.current}\n` +
+    `Nouvelle version : v${checkData.latest}\n\n` +
+    `Le service va être redémarré. Continuer ?`
+  );
+  if (!confirmed) {
+    hideUpdateModal();
+    toast('Mise à jour annulée', 'info');
+    return;
+  }
+
+  // ── Étape 2: Téléchargement + Installation ──
+  setUpdateStep('update-step-download', 'active');
+
+  let updateData;
+  try {
+    const resp = await fetch('/api/update', { method: 'POST' });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      // Essayer de parser le JSON d'erreur
+      try {
+        const errJson = JSON.parse(text);
+        throw new Error(errJson.detail || errJson.message || `HTTP ${resp.status}`);
+      } catch (parseErr) {
+        throw new Error(text || `HTTP ${resp.status}`);
+      }
+    }
+    updateData = await resp.json();
+  } catch (err) {
+    setUpdateStep('update-step-download', 'error');
+    showUpdateError('Échec de la mise à jour: ' + err.message);
+    return;
+  }
+
+  // ── Cas: déjà à jour (le serveur peut le détecter aussi) ──
+  if (updateData.status === 'up-to-date') {
+    setUpdateStep('update-step-download', 'done');
+    showUpdateSuccess(`Déjà à jour (v${updateData.current})`);
+    setTimeout(hideUpdateModal, 2500);
+    return;
+  }
+
+  // ── Étape 3: Installation réussie ──
+  setUpdateStep('update-step-download', 'done');
+  setUpdateStep('update-step-install', 'active');
+  setUpdateStep('update-step-install', 'done');
+  setUpdateStep('update-step-restart', 'active');
+  setUpdateStep('update-step-restart', 'done');
+
+  // ── Étape 4: Reconnexion ──
+  setUpdateStep('update-step-reconnect', 'active');
+  toast('✅ Mise à jour installée. Reconnexion...', 'success');
+  reconnectAfterUpdate();
+}
+
+/* ═══════════════════════════════════════════════════════════
    Initialisation
    ═══════════════════════════════════════════════════════════ */
 
@@ -782,6 +971,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       rescanBtn.textContent = '🔄 Re-scan';
     }
   });
+
+  // ── Bouton Update ───────────────────────────────
+  const updateBtn = document.getElementById('btn-update');
+  const updateModalClose = document.getElementById('update-modal-close');
+
+  if (updateBtn) {
+    updateBtn.addEventListener('click', performUpdate);
+  }
+  if (updateModalClose) {
+    updateModalClose.addEventListener('click', hideUpdateModal);
+  }
 
   // ── Auto-save : la sauvegarde est automatique côté serveur ──
 

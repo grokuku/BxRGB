@@ -34,6 +34,9 @@
       <button class="btn btn-secondary" id="btn-rescan">
         🔄 Re-scan
       </button>
+      <button class="btn btn-secondary" id="btn-update" title="Vérifier et installer les mises à jour">
+        ⬇ Update
+      </button>
     </div>
   </header>
 
@@ -155,6 +158,38 @@
 
   <!-- ════════════════════ TOAST CONTAINER ════════════════ -->
   <div class="toast-container" id="toast-container"></div>
+
+  <!-- ════════════════════ UPDATE MODAL ═══════════════════ -->
+  <div class="update-overlay hidden" id="update-overlay">
+    <div class="update-modal">
+      <div class="update-modal-header">
+        <span class="update-modal-title" id="update-modal-title">⬇ Mise à jour</span>
+        <button class="update-modal-close" id="update-modal-close">×</button>
+      </div>
+      <div class="update-modal-body" id="update-modal-body">
+        <div class="update-step" id="update-step-check">
+          <span class="update-step-icon">🔍</span>
+          <span>Vérification de la version...</span>
+        </div>
+        <div class="update-step hidden" id="update-step-download">
+          <span class="update-step-icon">⬇</span>
+          <span>Téléchargement de la mise à jour...</span>
+        </div>
+        <div class="update-step hidden" id="update-step-install">
+          <span class="update-step-icon">📦</span>
+          <span>Installation du binaire...</span>
+        </div>
+        <div class="update-step hidden" id="update-step-restart">
+          <span class="update-step-icon">🔄</span>
+          <span>Redémarrage du service...</span>
+        </div>
+        <div class="update-step hidden" id="update-step-reconnect">
+          <span class="update-step-icon">🔁</span>
+          <span>Reconnexion au serveur...</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- ════════════════════════ SCRIPTS ═══════════════════ -->
   <script src="js/colors.js"></script>
