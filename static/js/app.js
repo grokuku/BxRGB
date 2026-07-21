@@ -610,7 +610,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       indicator.textContent = 'Mode matrice';
       indicator.className = 'badge matrix';
       canvasEl.style.cursor = 'default';
-      canvas.setOrientation('matrix');
+      ledCanvas.setOrientation('matrix');
     } else {
       // Arrêter l'animation si elle tourne
       fetch('/api/animation/stop', { method: 'POST' }).catch(() => {});
@@ -621,7 +621,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       indicator.textContent = 'Mode classique';
       indicator.className = 'badge';
       canvasEl.style.cursor = 'pointer';
-      canvas.setOrientation(state.lastOrientation || 'vertical');
+      ledCanvas.setOrientation(state.lastOrientation || 'vertical');
     }
   });
 

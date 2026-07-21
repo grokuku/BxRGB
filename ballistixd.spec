@@ -3,7 +3,7 @@
 ballistixd.spec — Configuration PyInstaller pour le daemon Ballistix RGB.
 
 Build :
-  cd /home/holaf/code/RGB
+  cd <project_root>   (là où se trouve ce fichier .spec)
   pyinstaller ballistixd.spec --clean
 
 Output :
@@ -12,11 +12,15 @@ Output :
 
 import os
 
+# Répertoire racine du projet = dossier contenant ce .spec
+# Utilisé pour pathex au lieu d'un chemin hardcodé.
+SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
+
 block_cipher = None
 
 a = Analysis(
-    ['ballistixd.py'],
-    pathex=['.'],
+    [os.path.join(SPEC_DIR, 'ballistixd.py')],
+    pathex=[SPEC_DIR],
     binaries=[],
     datas=[
         # Bundle le dossier static/ (frontend HTML/CSS/JS)
