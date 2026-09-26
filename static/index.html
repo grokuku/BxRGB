@@ -40,7 +40,14 @@
     </div>
   </header>
 
+  <!-- ════════════════════════ TABS ════════════════════ -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="ballistix">💾 Ballistix</button>
+    <button class="tab-btn" data-tab="kraken">🦑 Kraken</button>
+  </div>
+
   <!-- ════════════════════════ MAIN ═════════════════════ -->
+  <div id="tab-ballistix" class="tab-panel active">
   <div class="main-content">
 
     <!-- ─── PANEL GAUCHE : Canvas ────────────────────── -->
@@ -143,6 +150,145 @@
             </div>
             <input type="range" id="brightness-slider" min="0" max="255" value="255">
             <span class="brightness-value" id="brightness-value">255</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  </div>
+
+  <!-- ─── PANEL KRAKEN ─────────────────────────────────── -->
+  <div id="tab-kraken" class="tab-panel">
+    <div class="main-content">
+
+      <div class="left-panel">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🦑 Statut Kraken</span>
+            <span class="badge" id="kraken-badge">Vérification...</span>
+          </div>
+          <div class="kraken-status" id="kraken-status">
+            <p style="color:var(--text-dim);">Vérification de liquidctl et du Kraken Z53...</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">⚙️ Maintenance</span>
+          </div>
+          <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">
+            L'initialisation est requise après chaque démarrage à froid ou mise à jour du firmware.
+          </p>
+          <button class="btn btn-secondary" id="kraken-btn-init">🔧 Initialize</button>
+        </div>
+      </div>
+
+      <div class="right-panel">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🖥 Écran LCD</span>
+            <span class="badge" id="kraken-lcd-badge">—</span>
+          </div>
+          <div class="kraken-section">
+            <div class="kraken-row">
+              <span class="kraken-label">Mode d'affichage</span>
+            </div>
+            <div class="kraken-row">
+              <button class="btn btn-primary" id="kraken-btn-liquid" style="flex:1">🌡 Température liquide</button>
+              <button class="btn btn-primary" id="kraken-btn-monitor" style="flex:1">🖥 Monitoring</button>
+            </div>
+            <div class="kraken-row">
+              <button class="btn btn-primary" id="kraken-btn-gallery" style="flex:1">🎞 Gallery</button>
+              <button class="btn btn-secondary" id="kraken-btn-stop-display" style="flex:1" disabled>⏹ Arrêter</button>
+            </div>
+            <div class="kraken-row">
+              <span class="kraken-label">Intervalle d'actualisation : <span id="kraken-interval-value">10s</span></span>
+            </div>
+            <div class="kraken-row">
+              <input type="range" id="kraken-interval" min="5" max="60" step="5" value="10" style="flex:1">
+            </div>
+            <div class="kraken-row">
+              <span class="kraken-label">Image statique (PNG/JPEG, 640×640 conseillé)</span>
+            </div>
+            <div class="kraken-row">
+              <input type="file" id="kraken-file-image" accept="image/png,image/jpeg" class="kraken-file">
+              <button class="btn btn-secondary" id="kraken-btn-image">🖼 Envoyer l'image</button>
+            </div>
+            <div class="kraken-row">
+              <span class="kraken-label">GIF animé (≤ 20 Mo, ≤ 24 FPS)</span>
+            </div>
+            <div class="kraken-row">
+              <input type="file" id="kraken-file-gif" accept="image/gif" class="kraken-file">
+              <button class="btn btn-secondary" id="kraken-btn-gif">🎬 Envoyer le GIF</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="kraken-monitor-card">
+          <div class="card-header">
+            <span class="card-title">📊 Monitoring — stats affichées</span>
+            <button class="btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
+          </div>
+          <div class="kraken-section">
+            <div class="kraken-row">
+              <label class="kraken-check"><input type="checkbox" id="kraken-cpu" checked> 🌡 Température CPU</label>
+              <label class="kraken-check"><input type="checkbox" id="kraken-gpu" checked> 🎮 Température GPU</label>
+            </div>
+            <div class="kraken-row">
+              <label class="kraken-check"><input type="checkbox" id="kraken-ram" checked> 💾 Mémoire RAM</label>
+              <label class="kraken-check"><input type="checkbox" id="kraken-vram" checked> 🎮 Mémoire GPU</label>
+            </div>
+            <div class="kraken-row">
+              <label class="kraken-check"><input type="checkbox" id="kraken-disks" checked> 💿 Disques</label>
+              <label class="kraken-check"><input type="checkbox" id="kraken-liquid-temp" checked> 🌡 Température liquide</label>
+            </div>
+            <div class="kraken-row">
+              <img id="kraken-preview-img" class="kraken-preview hidden" alt="Aperçu monitoring" width="320">
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="kraken-gallery-card">
+          <div class="card-header">
+            <span class="card-title">🎞 Gallery — images du diaporama</span>
+            <span class="badge" id="kraken-gallery-count">0 fichier(s)</span>
+          </div>
+          <div class="kraken-section">
+            <div class="kraken-row">
+              <input type="file" id="kraken-file-gallery" accept="image/png,image/jpeg,image/gif" class="kraken-file" multiple>
+              <button class="btn btn-secondary" id="kraken-btn-gallery-add">➕ Ajouter</button>
+            </div>
+            <div class="kraken-gallery-list" id="kraken-gallery-list"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">☀️ Luminosité</span>
+          </div>
+          <div class="brightness-section">
+            <div class="brightness-row">
+              <div class="brightness-label">Luminosité</div>
+              <input type="range" id="kraken-brightness" min="0" max="100" value="80">
+              <span class="brightness-value" id="kraken-brightness-value">80</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🔄 Orientation</span>
+          </div>
+          <div class="kraken-section">
+            <div class="kraken-row">
+              <select id="kraken-orientation" class="kraken-select">
+                <option value="0">0° — Standard</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>

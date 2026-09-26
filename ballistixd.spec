@@ -49,6 +49,12 @@ a = Analysis(
         'pydantic',
         # Websockets (utilisé par le manager WS)
         'websockets',
+        # Monitoring Kraken (stats système + rendu d'image)
+        'psutil',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageDraw',
+        'PIL.ImageFont',
         # Package ballistix
         'ballistix',
         'ballistix.core',
@@ -56,6 +62,8 @@ a = Analysis(
         'ballistix.diagnostics',
         'ballistix.config',
         'ballistix.animations',
+        'ballistix.kraken',
+        'ballistix.monitor',
         'ballistix.server',
     ],
     hookspath=[],

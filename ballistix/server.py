@@ -30,6 +30,15 @@ from pydantic import BaseModel
 
 from .core import CrucialStick, ok, fail, warn
 from .detect import detect_sticks
+from .kraken import (
+    kraken_available, kraken_detect, kraken_status,
+    kraken_initialize, kraken_set_lcd_mode, kraken_set_lcd_image,
+    kraken_set_lcd_brightness, kraken_set_lcd_orientation,
+    kraken_save_image, kraken_decode_b64,
+    kraken_gallery_list, kraken_gallery_add, kraken_gallery_delete,
+    kraken_gallery_start, kraken_monitor_start, kraken_stop_display,
+    kraken_monitor_preview, _display_thread_status,
+)
 
 # ── Version du daemon (pour l'auto-update) ───────────────────
 DAEMON_VERSION = "0.0.1"
@@ -980,6 +989,167 @@ async def rescan_buses():
     sticks = smbus.scan()
     await ws_manager.broadcast({"type": "rescan", "sticks": sticks})
     return {"status": "ok", "sticks": sticks}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Kraken NZXT (via liquidctl)
+# ═══════════════════════════════════════════════════════════════
+
+class KrakenModeBody(BaseModel):
+    """Mode de l'écran LCD du Kraken."""
+    mode: str
+
+class KrakenImageBody(BaseModel):
+    """Image à afficher sur l'écran LCD (base64)."""
+    data: str
+    filename: str = "screen.png"
+    animated: bool = False
+
+class KrakenValueBody(BaseModel):
+    """Valeur numérique (luminosité / orientation)."""
+    value: int
+
+
+@app.get("/api/kraken/status")
+async def kraken_status_endpoint():
+    """Statut du Kraken : liquidctl disponible, détection, températures."""
+    available = kraken_available()
+    detect = kraken_detect() if available else {"devices": [], "error": None}
+    status = kraken_status() if available else {"ok": False, "data": {}, "raw": "", "error": None}
+    return {
+        "available": available,
+        "detected": bool(detect.get("devices")),
+        "devices": detect.get("devices", []),
+        "status": status.get("data", {}) if status.get("ok") else {},
+        "status_raw": status.get("raw", ""),
+        "error": detect.get("error") or status.get("error"),
+    }
+
+
+@app.post("/api/kraken/initialize")
+async def kraken_initialize_endpoint():
+    """Initialise le Kraken (requis après chaque boot à froid)."""
+    return kraken_initialize()
+
+
+@app.post("/api/kraken/lcd/mode")
+async def kraken_lcd_mode(body: KrakenModeBody):
+    """Règle le mode de l'écran LCD (liquid)."""
+    return kraken_set_lcd_mode(body.mode)
+
+
+@app.post("/api/kraken/lcd/image")
+async def kraken_lcd_image(body: KrakenImageBody):
+    """Affiche une image (PNG/JPEG) ou un GIF sur l'écran LCD.
+
+    Body: {"data": "<base64>", "filename": "x.png", "animated": false}
+    """
+    try:
+        img_bytes = kraken_decode_b64(body.data)
+    except Exception as e:
+        raise HTTPException(400, f"Données base64 invalides : {e}")
+    if not img_bytes:
+        raise HTTPException(400, "Image vide")
+
+    try:
+        path = kraken_save_image(img_bytes, body.animated)
+    except Exception as e:
+        raise HTTPException(500, f"Sauvegarde de l'image impossible : {e}")
+
+    result = kraken_set_lcd_image(path, body.animated)
+    result["path"] = path
+    return result
+
+
+@app.post("/api/kraken/lcd/brightness")
+async def kraken_lcd_brightness(body: KrakenValueBody):
+    """Règle la luminosité de l'écran LCD (0-100)."""
+    return kraken_set_lcd_brightness(body.value)
+
+
+@app.post("/api/kraken/lcd/orientation")
+async def kraken_lcd_orientation(body: KrakenValueBody):
+    """Règle l'orientation de l'écran LCD (0/90/180/270)."""
+    return kraken_set_lcd_orientation(body.value)
+
+
+class KrakenGalleryAddBody(BaseModel):
+    """Image à ajouter à la gallery (base64)."""
+    data: str
+    filename: str
+
+class KrakenGalleryDeleteBody(BaseModel):
+    """Nom du fichier à supprimer de la gallery."""
+    name: str
+
+class KrakenDisplayBody(BaseModel):
+    """Paramètres du thread d'affichage (intervalle en secondes)."""
+    interval: float = 10.0
+
+
+@app.get("/api/kraken/gallery")
+async def kraken_gallery_endpoint():
+    """Liste les images de la gallery."""
+    return kraken_gallery_list()
+
+
+@app.post("/api/kraken/gallery/add")
+async def kraken_gallery_add_endpoint(body: KrakenGalleryAddBody):
+    """Ajoute une image/GIF à la gallery."""
+    try:
+        img_bytes = kraken_decode_b64(body.data)
+    except Exception as e:
+        raise HTTPException(400, f"Données base64 invalides : {e}")
+    if not img_bytes:
+        raise HTTPException(400, "Image vide")
+    return kraken_gallery_add(img_bytes, body.filename)
+
+
+@app.post("/api/kraken/gallery/delete")
+async def kraken_gallery_delete_endpoint(body: KrakenGalleryDeleteBody):
+    """Supprime une image de la gallery."""
+    return kraken_gallery_delete(body.name)
+
+
+@app.post("/api/kraken/gallery/start")
+async def kraken_gallery_start_endpoint(body: KrakenDisplayBody):
+    """Démarre le diaporama gallery."""
+    return kraken_gallery_start(max(2.0, body.interval))
+
+
+@app.post("/api/kraken/monitor/start")
+async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
+    """Démarre le mode monitoring (stats système sur l'écran)."""
+    return kraken_monitor_start(max(2.0, body.interval))
+
+
+@app.post("/api/kraken/display/stop")
+async def kraken_display_stop_endpoint():
+    """Arrête le thread d'affichage actif (monitoring ou gallery)."""
+    return kraken_stop_display()
+
+
+@app.get("/api/kraken/display/status")
+async def kraken_display_status_endpoint():
+    """État du thread d'affichage actif."""
+    return _display_thread_status()
+
+
+@app.post("/api/kraken/monitor/preview")
+async def kraken_monitor_preview_endpoint():
+    """Génère un aperçu du rendu monitoring (pour la page web)."""
+    return kraken_monitor_preview()
+
+
+@app.get("/api/kraken/monitor/preview.png")
+async def kraken_monitor_preview_image():
+    """Sert l'image d'aperçu monitoring générée."""
+    from fastapi.responses import FileResponse
+    from .kraken import _store_dir
+    path = _store_dir() / "monitor_preview.png"
+    if not path.is_file():
+        raise HTTPException(404, "Aucun aperçu généré — cliquez sur 👁 d'abord")
+    return FileResponse(str(path), media_type="image/png")
 
 
 # ═══════════════════════════════════════════════════════════════

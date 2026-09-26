@@ -744,6 +744,402 @@ async function performUpdate() {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   Kraken NZXT
+   ═══════════════════════════════════════════════════════════ */
+
+/** Met à jour le statut Kraken affiché dans l'onglet. */
+async function refreshKraken() {
+  const statusEl = document.getElementById('kraken-status');
+  const badgeEl = document.getElementById('kraken-badge');
+  if (!statusEl) return;
+
+  let data;
+  try {
+    const resp = await fetch('/api/kraken/status');
+    data = await resp.json();
+  } catch (err) {
+    statusEl.innerHTML = `<div class="kraken-status-error">⚠ Impossible de contacter le serveur : ${escapeHtml(err.message)}</div>`;
+    if (badgeEl) { badgeEl.textContent = 'Erreur'; badgeEl.className = 'badge err'; }
+    return;
+  }
+
+  if (!data.available) {
+    statusEl.innerHTML = `
+      <div class="kraken-status-error">
+        ⚠ <strong>liquidctl n'est pas installé.</strong><br>
+        Installez-le pour contrôler le Kraken :<br>
+        <code style="font-size:0.8rem;">sudo pip install liquidctl</code> ou <code style="font-size:0.8rem;">yay -S liquidctl</code>
+      </div>`;
+    if (badgeEl) { badgeEl.textContent = 'liquidctl manquant'; badgeEl.className = 'badge err'; }
+    setKrakenControls(false);
+    return;
+  }
+
+  if (data.detected) {
+    if (badgeEl) { badgeEl.textContent = 'Détecté'; badgeEl.className = 'badge ok'; }
+    const st = data.status || {};
+    const temp = st.liquid_temperature;
+    let tempClass = 'normal';
+    if (temp !== null && temp !== undefined) {
+      if (temp < 30) tempClass = 'cold';
+      else if (temp < 40) tempClass = 'normal';
+      else if (temp < 50) tempClass = 'warm';
+      else tempClass = 'hot';
+    }
+    statusEl.innerHTML = `
+      <div class="kraken-status-grid">
+        <div class="kraken-stat">
+          <div class="kraken-stat-label">🌡 Température liquide</div>
+          <div class="kraken-stat-value ${tempClass}">${temp !== null && temp !== undefined ? temp + '°C' : '—'}</div>
+        </div>
+        <div class="kraken-stat">
+          <div class="kraken-stat-label">🌀 Vitesse pompe</div>
+          <div class="kraken-stat-value">${st.pump_speed !== null && st.pump_speed !== undefined ? st.pump_speed + ' rpm' : '—'}</div>
+        </div>
+        <div class="kraken-stat">
+          <div class="kraken-stat-label">💨 Vitesse ventilos</div>
+          <div class="kraken-stat-value">${st.fan_speed !== null && st.fan_speed !== undefined ? st.fan_speed + ' rpm' : '—'}</div>
+        </div>
+      </div>`;
+    if (data.devices && data.devices.length) {
+      statusEl.innerHTML += `<div class="kraken-devices">🔌 ${escapeHtml(data.devices.join(' · '))}</div>`;
+    }
+    setKrakenControls(true);
+  } else {
+    statusEl.innerHTML = `
+      <div class="kraken-status-error">
+        ⚠ <strong>Aucun périphérique NZXT détecté.</strong><br>
+        Vérifiez que le Kraken est branché, que la règle udev est en place et relancez une détection.<br>
+        <code style="font-size:0.8rem;">liquidctl list</code>
+      </div>`;
+    if (badgeEl) { badgeEl.textContent = 'Non détecté'; badgeEl.className = 'badge err'; }
+    setKrakenControls(false);
+  }
+}
+
+/** Active/désactive les contrôles LCD selon la détection. */
+function setKrakenControls(enabled) {
+  ['kraken-btn-liquid', 'kraken-btn-monitor', 'kraken-btn-gallery', 'kraken-btn-stop-display',
+   'kraken-btn-image', 'kraken-btn-gif', 'kraken-file-image', 'kraken-file-gif',
+   'kraken-file-gallery', 'kraken-btn-gallery-add', 'kraken-btn-preview',
+   'kraken-brightness', 'kraken-orientation', 'kraken-interval'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && id !== 'kraken-btn-stop-display') el.disabled = !enabled;
+  });
+  const badge = document.getElementById('kraken-lcd-badge');
+  if (badge) {
+    badge.textContent = enabled ? 'Prêt' : 'Indisponible';
+    badge.className = enabled ? 'badge ok' : 'badge err';
+  }
+}
+
+/** Convertit un fichier en base64. */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Lecture du fichier impossible'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Affiche la température liquide sur l'écran. */
+async function krakenSetLiquid() {
+  await krakenStopDisplay(false);
+  try {
+    const resp = await fetch('/api/kraken/lcd/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'liquid' }),
+    });
+    const data = await resp.json();
+    if (data.ok) toast('🌡 Température liquide affichée', 'success');
+    else toast('⚠ ' + (data.error || 'Erreur mode LCD'), 'error');
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  }
+}
+
+/** Envoie une image (statique) ou un GIF sur l'écran. */
+async function krakenUploadImage(isGif) {
+  const fileInput = document.getElementById(isGif ? 'kraken-file-gif' : 'kraken-file-image');
+  const btn = document.getElementById(isGif ? 'kraken-btn-gif' : 'kraken-btn-image');
+  if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+    toast('⚠ Sélectionnez d\'abord un fichier', 'info');
+    return;
+  }
+  const file = fileInput.files[0];
+  btn.disabled = true;
+  btn.textContent = '⏳ Envoi...';
+  try {
+    const data = await fileToBase64(file);
+    const resp = await fetch('/api/kraken/lcd/image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data, filename: file.name, animated: isGif }),
+    });
+    const result = await resp.json();
+    if (result.ok) toast((isGif ? '🎬 GIF' : '🖼 Image') + ' affiché sur l\'écran', 'success');
+    else toast('⚠ ' + (result.error || 'Erreur envoi image'), 'error');
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = isGif ? '🎬 Envoyer le GIF' : '🖼 Envoyer l\'image';
+  }
+}
+
+/** Règle la luminosité de l'écran (debounced). */
+let krakenBrightnessTimer = null;
+function krakenSetBrightness(value) {
+  clearTimeout(krakenBrightnessTimer);
+  const val = parseInt(value, 10) || 0;
+  const label = document.getElementById('kraken-brightness-value');
+  if (label) label.textContent = val;
+  krakenBrightnessTimer = setTimeout(async () => {
+    try {
+      await fetch('/api/kraken/lcd/brightness', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: val }),
+      });
+    } catch (err) {
+      toast('⚠ Erreur luminosité: ' + err.message, 'error');
+    }
+  }, 400);
+}
+
+/** Règle l'orientation de l'écran. */
+async function krakenSetOrientation(value) {
+  try {
+    const resp = await fetch('/api/kraken/lcd/orientation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: parseInt(value, 10) || 0 }),
+    });
+    const data = await resp.json();
+    if (data.ok) toast('🔄 Orientation réglée', 'success');
+    else toast('⚠ ' + (data.error || 'Erreur orientation'), 'error');
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  }
+}
+
+/** Initialise le Kraken (après boot à froid). */
+async function krakenInitialize() {
+  const btn = document.getElementById('kraken-btn-init');
+  btn.disabled = true;
+  btn.textContent = '⏳ Initialisation...';
+  try {
+    const resp = await fetch('/api/kraken/initialize', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('🔧 Initialisation réussie', 'success');
+      setTimeout(refreshKraken, 500);
+    } else {
+      toast('⚠ ' + (data.error || 'Échec initialisation'), 'error');
+    }
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔧 Initialize';
+  }
+}
+
+/* ── Modes d'affichage : monitoring / gallery / arrêt ── */
+
+/** Lit l'intervalle sélectionné (secondes). */
+function krakenInterval() {
+  const el = document.getElementById('kraken-interval');
+  return el ? parseFloat(el.value) : 10;
+}
+
+/** Met à jour le bouton Arrêter selon l'état du thread. */
+async function refreshDisplayStatus() {
+  try {
+    const resp = await fetch('/api/kraken/display/status');
+    const data = await resp.json();
+    const stopBtn = document.getElementById('kraken-btn-stop-display');
+    if (stopBtn) stopBtn.disabled = !(data && data.running);
+  } catch (err) { /* silencieux */ }
+}
+
+/** Démarre le mode monitoring. */
+async function krakenStartMonitor() {
+  try {
+    const resp = await fetch('/api/kraken/monitor/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval: krakenInterval() }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('🖥 Monitoring démarré (toutes les ' + krakenInterval() + 's)', 'success');
+      refreshDisplayStatus();
+    } else {
+      toast('⚠ ' + (data.error || 'Échec démarrage monitoring'), 'error');
+    }
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  }
+}
+
+/** Démarre le diaporama gallery. */
+async function krakenStartGallery() {
+  try {
+    const resp = await fetch('/api/kraken/gallery/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval: krakenInterval() }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('🎞 Diaporama démarré', 'success');
+      refreshDisplayStatus();
+    } else {
+      toast('⚠ ' + (data.error || 'Échec démarrage gallery'), 'error');
+    }
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  }
+}
+
+/** Arrête le thread d'affichage actif. */
+async function krakenStopDisplay(notify = true) {
+  try {
+    const resp = await fetch('/api/kraken/display/stop', { method: 'POST' });
+    const data = await resp.json();
+    if (notify && data.ok) toast('⏹ Affichage automatique arrêté', 'info');
+    refreshDisplayStatus();
+  } catch (err) {
+    if (notify) toast('⚠ Erreur arrêt: ' + err.message, 'error');
+  }
+}
+
+/** Génère un aperçu du rendu monitoring. */
+async function krakenPreview() {
+  const img = document.getElementById('kraken-preview-img');
+  try {
+    const resp = await fetch('/api/kraken/monitor/preview', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok && data.path) {
+      // Le serveur stocke l'image dans ~/.config/ballistix/kraken/ — sert via l'API status
+      // Pour éviter d'exposer des chemins locaux, on refetch le status qui donne le rendu.
+      // Simplification : on charge via /api/kraken/monitor/image (route dédiée) — voir ci-dessous.
+      toast('👁 Aperçu généré', 'success');
+      loadKrakenPreview();
+    } else {
+      toast('⚠ ' + (data.error || 'Aperçu impossible'), 'error');
+    }
+  } catch (err) {
+    toast('⚠ Erreur aperçu: ' + err.message, 'error');
+  }
+}
+
+/** Charge l'aperçu monitoring généré par le serveur. */
+async function loadKrakenPreview() {
+  const img = document.getElementById('kraken-preview-img');
+  if (!img) return;
+  img.classList.remove('hidden');
+  img.src = '/api/kraken/monitor/preview.png?t=' + Date.now();
+}
+
+/** Rafraîchit la liste des fichiers de la gallery. */
+async function refreshKrakenGallery() {
+  const listEl = document.getElementById('kraken-gallery-list');
+  const countEl = document.getElementById('kraken-gallery-count');
+  if (!listEl) return;
+  try {
+    const resp = await fetch('/api/kraken/gallery');
+    const data = await resp.json();
+    if (!data.ok) {
+      listEl.innerHTML = `<div class="kraken-status-error">⚠ ${escapeHtml(data.error || 'Erreur')}</div>`;
+      return;
+    }
+    const files = data.files || [];
+    if (countEl) countEl.textContent = files.length + ' fichier(s)';
+    if (!files.length) {
+      listEl.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;">Aucune image — ajoutez-en pour le diaporama.</div>';
+      return;
+    }
+    listEl.innerHTML = files.map((f) => `
+      <div class="kraken-gallery-item">
+        <span>${f.is_gif ? '🎬' : '🖼'}</span>
+        <span class="name">${escapeHtml(f.name)}</span>
+        <span class="meta">${(f.size / 1024).toFixed(0)} Ko</span>
+        <button class="delete" data-name="${escapeHtml(f.name)}" title="Supprimer">✕</button>
+      </div>`).join('');
+    listEl.querySelectorAll('.delete').forEach((btn) => {
+      btn.addEventListener('click', () => krakenDeleteGalleryItem(btn.dataset.name));
+    });
+  } catch (err) {
+    listEl.innerHTML = `<div class="kraken-status-error">⚠ ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/** Ajoute les fichiers sélectionnés à la gallery. */
+async function krakenAddGalleryFiles() {
+  const input = document.getElementById('kraken-file-gallery');
+  const btn = document.getElementById('kraken-btn-gallery-add');
+  if (!input || !input.files || !input.files.length) {
+    toast('⚠ Sélectionnez un ou plusieurs fichiers', 'info');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '⏳ Upload...';
+  let added = 0;
+  try {
+    for (const file of input.files) {
+      const data = await fileToBase64(file);
+      const resp = await fetch('/api/kraken/gallery/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data, filename: file.name }),
+      });
+      const result = await resp.json();
+      if (result.ok) added++;
+    }
+    toast('✅ ' + added + ' fichier(s) ajouté(s) à la gallery', 'success');
+    input.value = '';
+    refreshKrakenGallery();
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '➕ Ajouter';
+  }
+}
+
+/** Supprime un fichier de la gallery. */
+async function krakenDeleteGalleryItem(name) {
+  if (!confirm('Supprimer "' + name + '" de la gallery ?')) return;
+  try {
+    const resp = await fetch('/api/kraken/gallery/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      toast('🗑 Fichier supprimé', 'info');
+      refreshKrakenGallery();
+    } else {
+      toast('⚠ ' + (data.error || 'Suppression impossible'), 'error');
+    }
+  } catch (err) {
+    toast('⚠ Erreur: ' + err.message, 'error');
+  }
+}
+
+/** Échappe le HTML pour éviter les injections. */
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+/* ═══════════════════════════════════════════════════════════
    Initialisation
    ═══════════════════════════════════════════════════════════ */
 
@@ -984,6 +1380,67 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ── Auto-save : la sauvegarde est automatique côté serveur ──
+
+  // ── Onglets ────────────────────────────────────────────
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + target));
+      if (target === 'kraken') refreshKraken();
+    });
+  });
+
+  // ── Contrôles Kraken ───────────────────────────────────
+  const krakenBtnLiquid = document.getElementById('kraken-btn-liquid');
+  if (krakenBtnLiquid) krakenBtnLiquid.addEventListener('click', krakenSetLiquid);
+
+  const krakenBtnMonitor = document.getElementById('kraken-btn-monitor');
+  if (krakenBtnMonitor) krakenBtnMonitor.addEventListener('click', krakenStartMonitor);
+
+  const krakenBtnGallery = document.getElementById('kraken-btn-gallery');
+  if (krakenBtnGallery) krakenBtnGallery.addEventListener('click', krakenStartGallery);
+
+  const krakenBtnStopDisplay = document.getElementById('kraken-btn-stop-display');
+  if (krakenBtnStopDisplay) krakenBtnStopDisplay.addEventListener('click', () => krakenStopDisplay(true));
+
+  const krakenInterval = document.getElementById('kraken-interval');
+  if (krakenInterval) {
+    krakenInterval.addEventListener('input', (e) => {
+      const label = document.getElementById('kraken-interval-value');
+      if (label) label.textContent = e.target.value + 's';
+    });
+  }
+
+  const krakenBtnPreview = document.getElementById('kraken-btn-preview');
+  if (krakenBtnPreview) krakenBtnPreview.addEventListener('click', krakenPreview);
+
+  const krakenBtnGalleryAdd = document.getElementById('kraken-btn-gallery-add');
+  if (krakenBtnGalleryAdd) krakenBtnGalleryAdd.addEventListener('click', krakenAddGalleryFiles);
+
+  const krakenBtnImage = document.getElementById('kraken-btn-image');
+  if (krakenBtnImage) krakenBtnImage.addEventListener('click', () => krakenUploadImage(false));
+
+  const krakenBtnGif = document.getElementById('kraken-btn-gif');
+  if (krakenBtnGif) krakenBtnGif.addEventListener('click', () => krakenUploadImage(true));
+
+  const krakenBrightness = document.getElementById('kraken-brightness');
+  if (krakenBrightness) {
+    krakenBrightness.addEventListener('input', (e) => krakenSetBrightness(e.target.value));
+  }
+
+  const krakenOrientation = document.getElementById('kraken-orientation');
+  if (krakenOrientation) {
+    krakenOrientation.addEventListener('change', (e) => krakenSetOrientation(e.target.value));
+  }
+
+  const krakenBtnInit = document.getElementById('kraken-btn-init');
+  if (krakenBtnInit) krakenBtnInit.addEventListener('click', krakenInitialize);
+
+  // Vérification silencieuse du Kraken au chargement (ne bloque pas l'init)
+  refreshKraken();
+  refreshKrakenGallery();
+  refreshDisplayStatus();
 
   // ── Connexion (WebSocket ou REST selon disponibilité) ─
   updateConnectionStatus(false);

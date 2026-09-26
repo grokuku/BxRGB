@@ -8,6 +8,10 @@ uvicorn[standard]>=0.32.0
 # Validation Pydantic (inclus avec FastAPI)
 pydantic>=2.0.0
 
+# Monitoring Kraken : stats système + rendu d'image pour l'écran LCD
+psutil>=5.9.0
+pillow>=10.0.0
+
 # Note : tkinter est inclus avec la bibliothèque standard Python.
 #        Sur certaines distributions Linux, l'interface graphique
 #        est dans un paquet séparé à installer via le gestionnaire
