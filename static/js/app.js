@@ -966,16 +966,37 @@ async function refreshDisplayStatus() {
 }
 
 /** Démarre le mode monitoring. */
+/**
+ * Récupère la configuration actuelle du monitoring (thème et capteurs).
+ * @returns {{theme: string, options: string[]}}
+ */
+function getKrakenMonitorConfig() {
+  const theme = document.getElementById('kraken-theme').value;
+  const options = [];
+  if (document.getElementById('kraken-cpu').checked) options.push('cpu');
+  if (document.getElementById('kraken-gpu').checked) options.push('gpu');
+  if (document.getElementById('kraken-ram').checked) options.push('ram');
+  if (document.getElementById('kraken-vram').checked) options.push('vram');
+  if (document.getElementById('kraken-disks').checked) options.push('disks');
+  return { theme, options };
+}
+
+/** Démarre le mode monitoring. */
 async function krakenStartMonitor() {
+  const config = getKrakenMonitorConfig();
   try {
     const resp = await fetch('/api/kraken/monitor/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval: krakenInterval() }),
+      body: JSON.stringify({ 
+        interval: krakenInterval(),
+        theme: config.theme,
+        options: config.options
+      }),
     });
     const data = await resp.json();
     if (data.ok) {
-      toast('🖥 Monitoring démarré (toutes les ' + krakenInterval() + 's)', 'success');
+      toast('🖥 Monitoring démarré (' + config.theme + ', ' + krakenInterval() + 's)', 'success');
       refreshDisplayStatus();
     } else {
       toast('⚠ ' + (data.error || 'Échec démarrage monitoring'), 'error');
@@ -1019,21 +1040,26 @@ async function krakenStopDisplay(notify = true) {
 
 /** Génère un aperçu du rendu monitoring. */
 async function krakenPreview() {
+  const config = getKrakenMonitorConfig();
   const img = document.getElementById('kraken-preview-img');
   try {
-    const resp = await fetch('/api/kraken/monitor/preview', { method: 'POST' });
+    const resp = await fetch('/api/kraken/monitor/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        theme: config.theme,
+        options: config.options
+      }),
+    });
     const data = await resp.json();
     if (data.ok && data.path) {
-      // Le serveur stocke l'image dans ~/.config/ballistix/kraken/ — sert via l'API status
-      // Pour éviter d'exposer des chemins locaux, on refetch le status qui donne le rendu.
-      // Simplification : on charge via /api/kraken/monitor/image (route dédiée) — voir ci-dessous.
       toast('👁 Aperçu généré', 'success');
       loadKrakenPreview();
     } else {
       toast('⚠ ' + (data.error || 'Aperçu impossible'), 'error');
     }
   } catch (err) {
-    toast('⚠ Erreur aperçu: ' + err.message, 'error');
+    toast('⚠ Erreur: ' + err.message, 'error');
   }
 }
 

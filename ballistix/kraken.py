@@ -413,7 +413,7 @@ def kraken_gallery_start(interval: float = 15.0) -> dict:
     return {"ok": True, "message": f"Diaporama démarré ({len(files)} fichier(s), {interval:.0f}s)"}
 
 
-def kraken_monitor_start(interval: float = 10.0) -> dict:
+def kraken_monitor_start(interval: float = 10.0, theme: str = "data_center", options: list = None) -> dict:
     """Démarre le monitoring : génère une image de stats et l'envoie.
 
     Nécessite Pillow + psutil (module ballistix.monitor).
@@ -441,7 +441,7 @@ def kraken_monitor_start(interval: float = 10.0) -> dict:
                     stats["liquid_temp"] = s["data"]["liquid_temperature"]
             except Exception:
                 pass
-            if render_monitoring_image(stats, screen_path, "MONITORING"):
+            if render_monitoring_image(stats, screen_path, theme, options):
                 kraken_set_lcd_image(screen_path, animated=False)
             _stop_event.wait(interval)
 
@@ -451,10 +451,10 @@ def kraken_monitor_start(interval: float = 10.0) -> dict:
             target=_monitor_loop, name="kraken-monitor", daemon=True
         )
         _active_thread.start()
-    return {"ok": True, "message": f"Monitoring démarré (intervalle {interval:.0f}s)"}
+    return {"ok": True, "message": f"Monitoring démarré ({theme}, intervalle {interval:.0f}s)"}
 
 
-def kraken_monitor_preview() -> dict:
+def kraken_monitor_preview(theme: str = "data_center", options: list = None) -> dict:
     """Génère une image de monitoring de test (pour l'aperçu web).
 
     Retourne {"ok": bool, "path": str|None, "error": str|None}.
@@ -472,7 +472,7 @@ def kraken_monitor_preview() -> dict:
         if s["ok"] and s["data"].get("liquid_temperature") is not None:
             stats["liquid_temp"] = s["data"]["liquid_temperature"]
         path = str(_store_dir() / "monitor_preview.png")
-        ok = render_monitoring_image(stats, path, "MONITORING")
+        ok = render_monitoring_image(stats, path, theme, options)
         return {"ok": ok, "path": path if ok else None, "error": None if ok else "Rendu impossible"}
     except Exception as e:
         return {"ok": False, "path": None, "error": str(e)}

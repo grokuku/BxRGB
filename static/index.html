@@ -227,10 +227,23 @@
 
         <div class="card" id="kraken-monitor-card">
           <div class="card-header">
-            <span class="card-title">📊 Monitoring — stats affichées</span>
+            <span class="card-title">📊 Monitoring — configuration</span>
             <button class="btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
           </div>
           <div class="kraken-section">
+            <div class="kraken-row">
+              <span class="kraken-label">Thème visuel</span>
+            </div>
+            <div class="kraken-row">
+              <select id="kraken-theme" class="kraken-select">
+                <option value="data_center">Data Center (Bleu Technique)</option>
+                <option value="overclock">Overclock (Rouge Agressif)</option>
+                <option value="fluid_flow">Fluid Flow (Bleu Pastel)</option>
+              </select>
+            </div>
+            <div class="kraken-row">
+              <span class="kraken-label">Capteurs à afficher</span>
+            </div>
             <div class="kraken-row">
               <label class="kraken-check"><input type="checkbox" id="kraken-cpu" checked> 🌡 Température CPU</label>
               <label class="kraken-check"><input type="checkbox" id="kraken-gpu" checked> 🎮 Température GPU</label>

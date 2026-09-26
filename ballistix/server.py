@@ -1085,6 +1085,8 @@ class KrakenGalleryDeleteBody(BaseModel):
 class KrakenDisplayBody(BaseModel):
     """Paramètres du thread d'affichage (intervalle en secondes)."""
     interval: float = 10.0
+    theme: str = "data_center"
+    options: Optional[List[str]] = None
 
 
 @app.get("/api/kraken/gallery")
@@ -1120,7 +1122,11 @@ async def kraken_gallery_start_endpoint(body: KrakenDisplayBody):
 @app.post("/api/kraken/monitor/start")
 async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
     """Démarre le mode monitoring (stats système sur l'écran)."""
-    return kraken_monitor_start(max(2.0, body.interval))
+    return kraken_monitor_start(
+        max(2.0, body.interval), 
+        theme=body.theme, 
+        options=body.options
+    )
 
 
 @app.post("/api/kraken/display/stop")
@@ -1136,9 +1142,13 @@ async def kraken_display_status_endpoint():
 
 
 @app.post("/api/kraken/monitor/preview")
-async def kraken_monitor_preview_endpoint():
+async def kraken_monitor_preview_endpoint(body: KrakenDisplayBody = None):
     """Génère un aperçu du rendu monitoring (pour la page web)."""
-    return kraken_monitor_preview()
+    body = body or KrakenDisplayBody()
+    return kraken_monitor_preview(
+        theme=body.theme, 
+        options=body.options
+    )
 
 
 @app.get("/api/kraken/monitor/preview.png")
