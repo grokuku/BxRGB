@@ -71,9 +71,13 @@ jobs:
       - name: Extract short SHA
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Set image name
+        id: image
+        run: echo "image=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
       - name: Push to GHCR
         run: |
-          docker tag bxrgb:test ghcr.io/${{ github.repository }}:test
-          docker tag bxrgb:test ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.sha_short }}
-          docker push ghcr.io/${{ github.repository }}:test
-          docker push ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.sha_short }}
+          IMAGE=ghcr.io/${{ steps.image.outputs.image }}
+          docker tag bxrgb:test $IMAGE:test
+          docker tag bxrgb:test $IMAGE:sha-${{ steps.vars.outputs.sha_short }}
+          docker push $IMAGE:test
+          docker push $IMAGE:sha-${{ steps.vars.outputs.sha_short }}

@@ -42,11 +42,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set image name
+        id: image
+        run: echo "image=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
       - name: Build and Push
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }} .
-          docker push ghcr.io/${{ github.repository }}:latest
-          docker push ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }}
+          IMAGE=ghcr.io/${{ steps.image.outputs.image }}
+          docker build -t $IMAGE:latest -t $IMAGE:${{ steps.version.outputs.ver }} .
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ steps.version.outputs.ver }}
       - name: Increment version
         run: |
           VERSION=${{ steps.version.outputs.ver }}
