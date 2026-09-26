@@ -115,12 +115,9 @@ function initDnD(state, onLedClick) {
         // Re-rendre le canvas et le DnD
         state.notify();
 
-        // Persister l'ordre dans la configuration
-        fetch('/api/colors/save', { method: 'POST' })
-          .then(r => {
-            if (r.ok) console.log('✅ Ordre des sticks sauvegardé');
-            else console.warn('⚠ Échec sauvegarde ordre');
-          })
+        // Persister l'ordre dans la configuration (apiFetch global, app.js)
+        apiFetch('/colors/save', { method: 'POST' })
+          .then(() => console.log('✅ Ordre des sticks sauvegardé'))
           .catch(err => console.warn('⚠ Erreur sauvegarde ordre:', err));
       });
 

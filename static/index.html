@@ -315,42 +315,14 @@
     <button class="btn btn-secondary" id="btn-sync">🔄 Sync</button>
   </footer>
 
-  <!-- ════════════════════ TOAST CONTAINER ════════════════ -->
-  <div class="toast-container" id="toast-container"></div>
-
-  <!-- ════════════════════ UPDATE MODAL ═══════════════════ -->
-  <div class="update-overlay hidden" id="update-overlay">
-    <div class="update-modal">
-      <div class="update-modal-header">
-        <span class="update-modal-title" id="update-modal-title">⬇ Mise à jour</span>
-        <button class="update-modal-close" id="update-modal-close">×</button>
-      </div>
-      <div class="update-modal-body" id="update-modal-body">
-        <div class="update-step" id="update-step-check">
-          <span class="update-step-icon">🔍</span>
-          <span>Vérification de la version...</span>
-        </div>
-        <div class="update-step hidden" id="update-step-download">
-          <span class="update-step-icon">⬇</span>
-          <span>Téléchargement de la mise à jour...</span>
-        </div>
-        <div class="update-step hidden" id="update-step-install">
-          <span class="update-step-icon">📦</span>
-          <span>Installation du binaire...</span>
-        </div>
-        <div class="update-step hidden" id="update-step-restart">
-          <span class="update-step-icon">🔄</span>
-          <span>Redémarrage du service...</span>
-        </div>
-        <div class="update-step hidden" id="update-step-reconnect">
-          <span class="update-step-icon">🔁</span>
-          <span>Reconnexion au serveur...</span>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- ════════════════════════ SCRIPTS ═══════════════════ -->
+  <!-- Briques holaf (copies pinnées). Modules ES : exposent aussi
+       window.Holaf* (pattern « dual »), disponible à partir de
+       DOMContentLoaded — les scripts classiques ci-dessous ne les
+       utilisent donc que dans leurs handlers DOMContentLoaded. -->
+  <script type="module" src="vendor/holaf/holaf-toast.js"></script>
+  <script type="module" src="vendor/holaf/holaf-fetch.js"></script>
+  <script type="module" src="vendor/holaf/holaf-modal.js"></script>
   <script src="js/colors.js"></script>
   <script src="js/canvas.js"></script>
   <script src="js/dnd.js"></script>

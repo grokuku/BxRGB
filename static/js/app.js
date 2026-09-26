@@ -71,26 +71,63 @@ const state = {
 };
 
 /* ═══════════════════════════════════════════════════════════
-   Toast / Notifications
+   Thèmes holaf — alignés sur la palette sombre BxRGB (style.css)
+   ═══════════════════════════════════════════════════════════ */
+
+/** Variables --ht-* de HolafToast alignées sur :root (style.css). */
+const TOAST_THEME = {
+  '--ht-bg': '#1c2333',            // --bg-card
+  '--ht-fg': '#ffffff',            // --text-primary
+  '--ht-border': '#484f58',        // --border-light
+  '--ht-accent-info': '#e94560',   // --accent
+  '--ht-accent-success': '#2ecc71',// --success
+  '--ht-accent-warning': '#f39c12',// --warning
+  '--ht-accent-error': '#e74c3c',  // --error
+  '--ht-shadow': '0 4px 20px rgba(0, 0, 0, 0.5)',
+  '--ht-radius': '10px',
+};
+
+/** Variables --hm-* de HolafModal alignées sur :root (style.css). */
+const MODAL_THEME = {
+  '--hm-bg': '#1c2333',            // --bg-card
+  '--hm-bg-secondary': '#161b22',  // --bg-secondary
+  '--hm-bg-input': '#0d1117',      // --bg-primary
+  '--hm-text': '#ffffff',          // --text-primary
+  '--hm-text-secondary': '#c9d1d9',// --text-secondary
+  '--hm-border': '#30363d',        // --border
+  '--hm-accent': '#e94560',        // --accent
+  '--hm-accent-hover': '#ff6b81',  // --accent-hover
+  '--hm-accent-text': '#ffffff',
+  '--hm-danger': '#e74c3c',        // --error
+  '--hm-danger-hover': '#c7324a',  // --accent-dim
+  '--hm-danger-text': '#ffffff',
+  '--hm-overlay-bg': 'rgba(0, 0, 0, 0.7)',
+  '--hm-radius': '10px',
+  '--hm-shadow': '0 8px 40px rgba(0, 0, 0, 0.6)',
+  '--hm-busy-bg': 'rgba(28, 35, 51, 0.82)',
+};
+
+/* ═══════════════════════════════════════════════════════════
+   Toast / Notifications (brique HolafToast)
    ═══════════════════════════════════════════════════════════ */
 
 /**
- * Affiche une notification toast en haut à droite.
+ * Affiche une notification via la brique HolafToast.
+ * Conserve la signature des ~50 appels existants : toast(message, type).
  * @param {string} message
  * @param {'info'|'success'|'error'} type
  */
 function toast(message, type = 'info') {
-  const container = document.getElementById('toast-container');
-  if (!container) return;
-
-  const el = document.createElement('div');
-  el.className = `toast ${type}`;
-  el.textContent = message;
-  container.appendChild(el);
-
-  setTimeout(() => {
-    if (el.parentNode) el.parentNode.removeChild(el);
-  }, 3000);
+  if (!window.HolafToast) {
+    console.warn('[toast] HolafToast indisponible :', message);
+    return;
+  }
+  return window.HolafToast.show({
+    message: String(message),
+    type,
+    duration: 3000,
+    theme: TOAST_THEME,
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -197,8 +234,7 @@ async function loadInitialState() {
  */
 async function initConnection() {
   try {
-    const resp = await fetch('/api/ws-status');
-    const status = await resp.json();
+    const status = await apiFetch('/ws-status');
 
     if (status.websocket) {
       console.log('✅ WebSocket disponible, connexion...');
@@ -462,17 +498,27 @@ function handleWSMessage(data) {
 
 const API_BASE = '/api';
 
-async function apiFetch(path, options = {}) {
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+/**
+ * Appel API JSON via la brique HolafFetch (timeout, erreurs typées, JSON
+ * blindé). Conserve la signature des appels existants : apiFetch(path, opts)
+ * → Promise<données JSON>. Lève une HolafFetchError en cas d'échec HTTP/réseau.
+ * Retry réseau/5xx UNIQUEMENT sur les GET (idempotents) : jamais sur les
+ * mutations (POST/PUT/DELETE) pour ne pas dupliquer un effet de bord.
+ * @param {string} path — chemin relatif à /api
+ * @param {Object} [options] — options HolafFetch (method, body, timeout, retry…)
+ * @returns {Promise<any>}
+ */
+function apiFetch(path, options = {}) {
+  if (!window.HolafFetch) {
+    return Promise.reject(new Error('HolafFetch indisponible'));
   }
-  return res.json();
+  const url = `${API_BASE}${path}`;
+  const method = (options.method || 'GET').toUpperCase();
+  const retry = options.retry !== undefined
+    ? options.retry
+    : (method === 'GET' ? { attempts: 2, backoffMs: 250 } : null);
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  return window.HolafFetch.request(url, { ...options, method, retry, headers });
 }
 
 async function fetchStatus() {
@@ -555,192 +601,117 @@ async function apiRescan() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Auto-Update
+   Auto-Update (brique HolafModal)
    ═══════════════════════════════════════════════════════════ */
 
 /**
- * Affiche le modal d'update et gère tout le flux.
- * @param {string} stepId - ID de l'étape à activer
- * @param {'active'|'done'|'error'} state
- */
-function setUpdateStep(stepId, state) {
-  const step = document.getElementById(stepId);
-  if (!step) return;
-  step.classList.remove('hidden', 'active', 'done', 'error');
-  if (state) step.classList.add(state);
-}
-
-/** Affiche le modal d'update. */
-function showUpdateModal(title) {
-  const overlay = document.getElementById('update-overlay');
-  const titleEl = document.getElementById('update-modal-title');
-  if (titleEl) titleEl.textContent = title || '⬇ Mise à jour';
-  if (overlay) overlay.classList.remove('hidden');
-}
-
-/** Cache le modal d'update. */
-function hideUpdateModal() {
-  const overlay = document.getElementById('update-overlay');
-  if (overlay) overlay.classList.add('hidden');
-  // Réinitialiser les étapes
-  ['update-step-check', 'update-step-download', 'update-step-install',
-   'update-step-restart', 'update-step-reconnect'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.add('hidden');
-  });
-}
-
-/** Ajoute un message d'erreur dans le modal. */
-function showUpdateError(message) {
-  const body = document.getElementById('update-modal-body');
-  if (!body) return;
-  // Retirer l'ancienne erreur
-  const oldErr = body.querySelector('.update-step.error-msg');
-  if (oldErr) oldErr.remove();
-  const errEl = document.createElement('div');
-  errEl.className = 'update-step error error-msg';
-  errEl.innerHTML = `<span class="update-step-icon">⚠</span><span>${message}</span>`;
-  body.appendChild(errEl);
-}
-
-/** Ajoute un message de succès dans le modal. */
-function showUpdateSuccess(message) {
-  const body = document.getElementById('update-modal-body');
-  if (!body) return;
-  const oldMsg = body.querySelector('.update-step.success-msg');
-  if (oldMsg) oldMsg.remove();
-  const msgEl = document.createElement('div');
-  msgEl.className = 'update-step done success-msg';
-  msgEl.innerHTML = `<span class="update-step-icon">✅</span><span>${message}</span>`;
-  body.appendChild(msgEl);
-}
-
-/**
  * Tente de se reconnecter au serveur après une mise à jour.
- * Recharge la page quand la connexion est rétablie.
+ * Met à jour le message du bus modal puis recharge la page quand la
+ * connexion est rétablie.
+ * @param {{set:Function,close:Function}|null} busy - contrôleur HolafModal.busy
  * @param {number} maxAttempts - nombre max de tentatives
  * @param {number} interval - ms entre les tentatives
  */
-function reconnectAfterUpdate(maxAttempts = 30, interval = 2000) {
+function reconnectAfterUpdate(busy = null, maxAttempts = 30, interval = 2000) {
   let attempts = 0;
 
-  function tryReconnect() {
+  async function tryReconnect() {
     attempts++;
     console.log(`🔁 Tentative de reconnexion ${attempts}/${maxAttempts}...`);
-
-    fetch('/api/status', { signal: AbortSignal.timeout(3000) })
-      .then(resp => {
-        if (resp.ok) {
-          console.log('✅ Serveur de nouveau accessible ! Rechargement...');
-          showUpdateSuccess('Serveur reconnecté ! Rechargement de la page...');
-          setTimeout(() => window.location.reload(), 1500);
-        } else {
-          if (attempts < maxAttempts) {
-            setTimeout(tryReconnect, interval);
-          } else {
-            showUpdateError('Le serveur ne répond pas après plusieurs tentatives. Rechargez la page manuellement.');
-          }
-        }
-      })
-      .catch(() => {
-        if (attempts < maxAttempts) {
-          setTimeout(tryReconnect, interval);
-        } else {
-          showUpdateError('Impossible de se reconnecter au serveur. Rechargez la page manuellement.');
-        }
-      });
+    try {
+      // retry:null → échec rapide, la boucle gère les tentatives.
+      await apiFetch('/status', { timeout: 3000, retry: null });
+      console.log('✅ Serveur de nouveau accessible ! Rechargement...');
+      if (busy) busy.set('Serveur reconnecté ! Rechargement de la page...');
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (_) {
+      if (attempts < maxAttempts) {
+        setTimeout(tryReconnect, interval);
+      } else if (busy) {
+        busy.close();
+        window.HolafModal.alert(
+          '⬇ Mise à jour',
+          'Le serveur ne répond pas après plusieurs tentatives. Rechargez la page manuellement.',
+          { theme: MODAL_THEME }
+        );
+      }
+    }
   }
 
   setTimeout(tryReconnect, interval);
 }
 
 /**
- * Lance le processus de mise à jour complet.
+ * Lance le processus de mise à jour complet (vérification, confirmation,
+ * installation, reconnexion) via HolafModal.busy / confirm / alert.
  */
 async function performUpdate() {
-  showUpdateModal('⬇ Mise à jour');
-
-  // ── Étape 1: Vérification ──
-  setUpdateStep('update-step-check', 'active');
+  // ── Étape 1 : vérification de la version ──
+  const busy = window.HolafModal.busy('Vérification de la version...');
 
   let checkData;
   try {
-    const resp = await fetch('/api/update/check');
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      throw new Error(text || `HTTP ${resp.status}`);
-    }
-    checkData = await resp.json();
+    checkData = await apiFetch('/update/check', { timeout: 15000 });
   } catch (err) {
-    setUpdateStep('update-step-check', 'error');
-    showUpdateError('Échec de la vérification: ' + err.message);
+    busy.close();
+    await window.HolafModal.alert(
+      '⬇ Mise à jour',
+      'Échec de la vérification : ' + err.message,
+      { theme: MODAL_THEME }
+    );
     return;
   }
-
-  setUpdateStep('update-step-check', 'done');
+  busy.close();
 
   if (!checkData.update_available) {
-    showUpdateSuccess(`Déjà à jour (v${checkData.current})`);
     toast('✅ Déjà à jour (v' + checkData.current + ')', 'success');
-    setTimeout(hideUpdateModal, 2500);
     return;
   }
 
-  // ── Demander confirmation ──
-  const confirmed = confirm(
-    `Une mise à jour est disponible !\n\n` +
-    `Version actuelle : v${checkData.current}\n` +
-    `Nouvelle version : v${checkData.latest}\n\n` +
-    `Le service va être redémarré. Continuer ?`
+  // ── Demande de confirmation ──
+  const confirmed = await window.HolafModal.confirm(
+    '⬇ Mise à jour disponible',
+    `Version actuelle : v${checkData.current} — Nouvelle version : v${checkData.latest}. ` +
+      `Le service va être redémarré. Continuer ?`,
+    { confirmText: 'Mettre à jour', cancelText: 'Annuler', theme: MODAL_THEME }
   );
   if (!confirmed) {
-    hideUpdateModal();
     toast('Mise à jour annulée', 'info');
     return;
   }
 
-  // ── Étape 2: Téléchargement + Installation ──
-  setUpdateStep('update-step-download', 'active');
+  // ── Étape 2 : téléchargement + installation ──
+  const installing = window.HolafModal.busy('Téléchargement de la mise à jour...');
 
   let updateData;
   try {
-    const resp = await fetch('/api/update', { method: 'POST' });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      // Essayer de parser le JSON d'erreur
-      try {
-        const errJson = JSON.parse(text);
-        throw new Error(errJson.detail || errJson.message || `HTTP ${resp.status}`);
-      } catch (parseErr) {
-        throw new Error(text || `HTTP ${resp.status}`);
-      }
-    }
-    updateData = await resp.json();
+    // retry:null + timeout large : opération non idempotente, upload potentiel.
+    updateData = await apiFetch('/update', { method: 'POST', timeout: 120000, retry: null });
   } catch (err) {
-    setUpdateStep('update-step-download', 'error');
-    showUpdateError('Échec de la mise à jour: ' + err.message);
+    installing.close();
+    await window.HolafModal.alert(
+      '⬇ Mise à jour',
+      'Échec de la mise à jour : ' + err.message,
+      { theme: MODAL_THEME }
+    );
     return;
   }
 
-  // ── Cas: déjà à jour (le serveur peut le détecter aussi) ──
+  // ── Cas : déjà à jour (le serveur peut le détecter aussi) ──
   if (updateData.status === 'up-to-date') {
-    setUpdateStep('update-step-download', 'done');
-    showUpdateSuccess(`Déjà à jour (v${updateData.current})`);
-    setTimeout(hideUpdateModal, 2500);
+    installing.close();
+    toast('✅ Déjà à jour (v' + updateData.current + ')', 'success');
     return;
   }
 
-  // ── Étape 3: Installation réussie ──
-  setUpdateStep('update-step-download', 'done');
-  setUpdateStep('update-step-install', 'active');
-  setUpdateStep('update-step-install', 'done');
-  setUpdateStep('update-step-restart', 'active');
-  setUpdateStep('update-step-restart', 'done');
+  // ── Étape 3 : installation réussie, redémarrage ──
+  installing.set('Installation du binaire...');
+  installing.set('Redémarrage du service...');
 
-  // ── Étape 4: Reconnexion ──
-  setUpdateStep('update-step-reconnect', 'active');
+  // ── Étape 4 : reconnexion ──
+  installing.set('Reconnexion au serveur...');
   toast('✅ Mise à jour installée. Reconnexion...', 'success');
-  reconnectAfterUpdate();
+  reconnectAfterUpdate(installing);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -755,8 +726,7 @@ async function refreshKraken() {
 
   let data;
   try {
-    const resp = await fetch('/api/kraken/status');
-    data = await resp.json();
+    data = await apiFetch('/kraken/status');
   } catch (err) {
     statusEl.innerHTML = `<div class="kraken-status-error">⚠ Impossible de contacter le serveur : ${escapeHtml(err.message)}</div>`;
     if (badgeEl) { badgeEl.textContent = 'Erreur'; badgeEl.className = 'badge err'; }
@@ -847,12 +817,10 @@ function fileToBase64(file) {
 async function krakenSetLiquid() {
   await krakenStopDisplay(false);
   try {
-    const resp = await fetch('/api/kraken/lcd/mode', {
+    const data = await apiFetch('/kraken/lcd/mode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'liquid' }),
+      body: { mode: 'liquid' },
     });
-    const data = await resp.json();
     if (data.ok) toast('🌡 Température liquide affichée', 'success');
     else toast('⚠ ' + (data.error || 'Erreur mode LCD'), 'error');
   } catch (err) {
@@ -873,12 +841,11 @@ async function krakenUploadImage(isGif) {
   btn.textContent = '⏳ Envoi...';
   try {
     const data = await fileToBase64(file);
-    const resp = await fetch('/api/kraken/lcd/image', {
+    const result = await apiFetch('/kraken/lcd/image', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data, filename: file.name, animated: isGif }),
+      timeout: 120000,
+      body: { data, filename: file.name, animated: isGif },
     });
-    const result = await resp.json();
     if (result.ok) toast((isGif ? '🎬 GIF' : '🖼 Image') + ' affiché sur l\'écran', 'success');
     else toast('⚠ ' + (result.error || 'Erreur envoi image'), 'error');
   } catch (err) {
@@ -898,10 +865,9 @@ function krakenSetBrightness(value) {
   if (label) label.textContent = val;
   krakenBrightnessTimer = setTimeout(async () => {
     try {
-      await fetch('/api/kraken/lcd/brightness', {
+      await apiFetch('/kraken/lcd/brightness', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value: val }),
+        body: { value: val },
       });
     } catch (err) {
       toast('⚠ Erreur luminosité: ' + err.message, 'error');
@@ -912,12 +878,10 @@ function krakenSetBrightness(value) {
 /** Règle l'orientation de l'écran. */
 async function krakenSetOrientation(value) {
   try {
-    const resp = await fetch('/api/kraken/lcd/orientation', {
+    const data = await apiFetch('/kraken/lcd/orientation', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: parseInt(value, 10) || 0 }),
+      body: { value: parseInt(value, 10) || 0 },
     });
-    const data = await resp.json();
     if (data.ok) toast('🔄 Orientation réglée', 'success');
     else toast('⚠ ' + (data.error || 'Erreur orientation'), 'error');
   } catch (err) {
@@ -931,8 +895,7 @@ async function krakenInitialize() {
   btn.disabled = true;
   btn.textContent = '⏳ Initialisation...';
   try {
-    const resp = await fetch('/api/kraken/initialize', { method: 'POST' });
-    const data = await resp.json();
+    const data = await apiFetch('/kraken/initialize', { method: 'POST' });
     if (data.ok) {
       toast('🔧 Initialisation réussie', 'success');
       setTimeout(refreshKraken, 500);
@@ -958,8 +921,7 @@ function krakenInterval() {
 /** Met à jour le bouton Arrêter selon l'état du thread. */
 async function refreshDisplayStatus() {
   try {
-    const resp = await fetch('/api/kraken/display/status');
-    const data = await resp.json();
+    const data = await apiFetch('/kraken/display/status');
     const stopBtn = document.getElementById('kraken-btn-stop-display');
     if (stopBtn) stopBtn.disabled = !(data && data.running);
   } catch (err) { /* silencieux */ }
@@ -985,16 +947,14 @@ function getKrakenMonitorConfig() {
 async function krakenStartMonitor() {
   const config = getKrakenMonitorConfig();
   try {
-    const resp = await fetch('/api/kraken/monitor/start', {
+    const data = await apiFetch('/kraken/monitor/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
+      body: {
         interval: krakenInterval(),
         theme: config.theme,
         options: config.options
-      }),
+      },
     });
-    const data = await resp.json();
     if (data.ok) {
       toast('🖥 Monitoring démarré (' + config.theme + ', ' + krakenInterval() + 's)', 'success');
       refreshDisplayStatus();
@@ -1009,12 +969,10 @@ async function krakenStartMonitor() {
 /** Démarre le diaporama gallery. */
 async function krakenStartGallery() {
   try {
-    const resp = await fetch('/api/kraken/gallery/start', {
+    const data = await apiFetch('/kraken/gallery/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval: krakenInterval() }),
+      body: { interval: krakenInterval() },
     });
-    const data = await resp.json();
     if (data.ok) {
       toast('🎞 Diaporama démarré', 'success');
       refreshDisplayStatus();
@@ -1029,8 +987,7 @@ async function krakenStartGallery() {
 /** Arrête le thread d'affichage actif. */
 async function krakenStopDisplay(notify = true) {
   try {
-    const resp = await fetch('/api/kraken/display/stop', { method: 'POST' });
-    const data = await resp.json();
+    const data = await apiFetch('/kraken/display/stop', { method: 'POST' });
     if (notify && data.ok) toast('⏹ Affichage automatique arrêté', 'info');
     refreshDisplayStatus();
   } catch (err) {
@@ -1043,15 +1000,13 @@ async function krakenPreview() {
   const config = getKrakenMonitorConfig();
   const img = document.getElementById('kraken-preview-img');
   try {
-    const resp = await fetch('/api/kraken/monitor/preview', {
+    const data = await apiFetch('/kraken/monitor/preview', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
+      body: {
         theme: config.theme,
         options: config.options
-      }),
+      },
     });
-    const data = await resp.json();
     if (data.ok && data.path) {
       toast('👁 Aperçu généré', 'success');
       loadKrakenPreview();
@@ -1077,8 +1032,7 @@ async function refreshKrakenGallery() {
   const countEl = document.getElementById('kraken-gallery-count');
   if (!listEl) return;
   try {
-    const resp = await fetch('/api/kraken/gallery');
-    const data = await resp.json();
+    const data = await apiFetch('/kraken/gallery');
     if (!data.ok) {
       listEl.innerHTML = `<div class="kraken-status-error">⚠ ${escapeHtml(data.error || 'Erreur')}</div>`;
       return;
@@ -1118,12 +1072,11 @@ async function krakenAddGalleryFiles() {
   try {
     for (const file of input.files) {
       const data = await fileToBase64(file);
-      const resp = await fetch('/api/kraken/gallery/add', {
+      const result = await apiFetch('/kraken/gallery/add', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data, filename: file.name }),
+        timeout: 120000,
+        body: { data, filename: file.name },
       });
-      const result = await resp.json();
       if (result.ok) added++;
     }
     toast('✅ ' + added + ' fichier(s) ajouté(s) à la gallery', 'success');
@@ -1139,14 +1092,17 @@ async function krakenAddGalleryFiles() {
 
 /** Supprime un fichier de la gallery. */
 async function krakenDeleteGalleryItem(name) {
-  if (!confirm('Supprimer "' + name + '" de la gallery ?')) return;
+  const ok = await window.HolafModal.confirm(
+    'Supprimer le fichier',
+    'Supprimer "' + name + '" de la gallery ?',
+    { danger: true, confirmText: 'Supprimer', cancelText: 'Annuler', theme: MODAL_THEME }
+  );
+  if (!ok) return;
   try {
-    const resp = await fetch('/api/kraken/gallery/delete', {
+    const data = await apiFetch('/kraken/gallery/delete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: { name },
     });
-    const data = await resp.json();
     if (data.ok) {
       toast('🗑 Fichier supprimé', 'info');
       refreshKrakenGallery();
@@ -1224,7 +1180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ledCanvas.setOrientation('matrix');
     } else {
       // Arrêter l'animation si elle tourne
-      fetch('/api/animation/stop', { method: 'POST' }).catch(() => {});
+      apiFetch('/animation/stop', { method: 'POST' }).catch(() => {});
       document.getElementById('btn-anim-start').disabled = false;
       document.getElementById('btn-anim-stop').disabled = true;
 
@@ -1247,22 +1203,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     try {
-      const resp = await fetch('/api/animation/start', {
+      await apiFetch('/animation/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ effect, speed, framerate })
+        body: { effect, speed, framerate }
       });
-
-      if (resp.ok) {
-        document.getElementById('btn-anim-start').disabled = true;
-        document.getElementById('btn-anim-rainbow').disabled = true;
-        document.getElementById('btn-anim-stop').disabled = false;
-        toast(label + ' démarrée', 'success');
-      } else {
-        toast('⚠ Erreur démarrage animation', 'error');
-      }
+      document.getElementById('btn-anim-start').disabled = true;
+      document.getElementById('btn-anim-rainbow').disabled = true;
+      document.getElementById('btn-anim-stop').disabled = false;
+      toast(label + ' démarrée', 'success');
     } catch (err) {
-      toast('⚠ Erreur: ' + err.message, 'error');
+      toast('⚠ Erreur démarrage animation: ' + err.message, 'error');
     }
   }
 
@@ -1271,13 +1221,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('btn-anim-stop').addEventListener('click', async () => {
     try {
-      const resp = await fetch('/api/animation/stop', { method: 'POST' });
-      if (resp.ok) {
-        document.getElementById('btn-anim-start').disabled = false;
-        document.getElementById('btn-anim-rainbow').disabled = false;
-        document.getElementById('btn-anim-stop').disabled = true;
-        toast('⏹ Animation arrêtée', 'success');
-      }
+      await apiFetch('/animation/stop', { method: 'POST' });
+      document.getElementById('btn-anim-start').disabled = false;
+      document.getElementById('btn-anim-rainbow').disabled = false;
+      document.getElementById('btn-anim-stop').disabled = true;
+      toast('⏹ Animation arrêtée', 'success');
     } catch (err) {
       toast('⚠ Erreur: ' + err.message, 'error');
     }
@@ -1289,10 +1237,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('anim-speed-value').textContent = speed.toFixed(2) + '×';
 
     try {
-      await fetch('/api/animation/speed', {
+      await apiFetch('/animation/speed', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speed })
+        body: { speed }
       });
     } catch (err) {
       // Silencieux
@@ -1304,10 +1251,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('anim-refresh-value').textContent = rate + '/s';
 
     try {
-      await fetch('/api/animation/refresh', {
+      await apiFetch('/animation/refresh', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rate })
+        body: { rate }
       });
     } catch (err) {
       // Silencieux
@@ -1330,7 +1276,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   syncBtn.addEventListener('click', async () => {
     syncBtn.disabled = true;
     try {
-      await fetch('/api/apply', { method: 'POST' });
+      await apiFetch('/apply', { method: 'POST' });
       toast('✅ LEDs synchronisées', 'success');
     } catch (err) {
       toast('❌ Erreur sync: ' + err.message, 'error');
@@ -1396,13 +1342,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ── Bouton Update ───────────────────────────────
   const updateBtn = document.getElementById('btn-update');
-  const updateModalClose = document.getElementById('update-modal-close');
-
   if (updateBtn) {
     updateBtn.addEventListener('click', performUpdate);
-  }
-  if (updateModalClose) {
-    updateModalClose.addEventListener('click', hideUpdateModal);
   }
 
   // ── Auto-save : la sauvegarde est automatique côté serveur ──
