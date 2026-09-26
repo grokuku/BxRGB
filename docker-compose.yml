@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   bxrgb:
-    build: .
+    image: ghcr.io/grokuku/bxrgb:latest
     container_name: bxrgb
     privileged: true
     network_mode: host
