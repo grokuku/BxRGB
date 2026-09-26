@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Syntax check
+        run: |
+          find ballistix -name "*.py" | xargs python -m py_compile
+
+  docker:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t bxrgb:test .
+      - name: Smoke test
+        run: ./scripts/ci-smoke.sh smoke
+      - name: Save image
+        run: docker save bxrgb:test > bxrgb_test.tar
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bxrgb-image
+          path: bxrgb_test.tar
+          retention-days: 1
+
+  publish:
+    needs: docker
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bxrgb-image
+      - name: Load image
+        run: docker load < bxrgb_test.tar
+      - name: Extract short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Push to GHCR
+        run: |
+          docker tag bxrgb:test ghcr.io/${{ github.repository }}:test
+          docker tag bxrgb:test ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.sha_short }}
+          docker push ghcr.io/${{ github.repository }}:test
+          docker push ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.sha_short }}

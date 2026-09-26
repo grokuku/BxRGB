@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  bxrgb:
+    build: .
+    container_name: bxrgb
+    privileged: true
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ~/.config/ballistix:/root/.config/ballistix
+      - /sys:/sys:ro
+      - /proc:/proc:ro
+      - /dev:/dev

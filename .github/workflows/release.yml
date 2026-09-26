@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Syntax check
+        run: |
+          find ballistix -name "*.py" | xargs python -m py_compile
+
+  publish:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        run: echo "ver=$(cat version.txt)" >> $GITHUB_OUTPUT
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and Push
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }} .
+          docker push ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }}
+      - name: Increment version
+        run: |
+          VERSION=${{ steps.version.outputs.ver }}
+          IFS='.' read -ra ADDR <<< "$VERSION"
+          PATCH=${ADDR[2]}
+          NEW_VERSION="${ADDR[0]}.${ADDR[1]}.$(($PATCH + 1))"
+          echo "$NEW_VERSION" > version.txt
+          echo "Bumped version to $NEW_VERSION"
+      - name: Commit and Push version bump
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt
+          git commit -m "chore: bump version to $(cat version.txt)"
+          git push
