@@ -166,7 +166,7 @@ def _disks() -> list:
     if not PSUTIL_AVAILABLE:
         return []
     skip_prefixes = ("/proc", "/sys", "/dev", "/run", "/tmp", "/snap",
-                     "/var/lib/docker", "/boot/efi", "/boot")
+                     "/var/lib/docker", "/boot/efi", "/boot", "/etc")
     results = []
     try:
         parts = psutil.disk_partitions(all=False)
