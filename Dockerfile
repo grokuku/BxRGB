@@ -1,20 +1,15 @@
 FROM python:3.11-slim
-
-# Install system dependencies
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     i2c-tools \
     build-essential \
+    bash \
+    procps \
     && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
 WORKDIR /app
-
-# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy project code
 COPY . .
-
-# Run the server
+RUN mkdir -p /root/.config/ballistix
 CMD ["python", "-m", "ballistix.server"]
