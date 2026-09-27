@@ -53,7 +53,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "display": {
             "mode": None,          # None | "monitor" | "gallery" (thread actif)
-            "theme": "data_center",  # data_center | overclock | fluid_flow
+            # Rendu = palette × disposition × capteurs.
+            # `theme` est conservé comme MIROIR historique de `palette`
+            # (rétrocompatibilité) ; la source de vérité est `palette`.
+            "theme": "data_center",  # data_center | overclock | fluid_flow | graphite | amber
+            "palette": "data_center",
+            # Disposition par défaut : « duo » (grand format 2 colonnes).
+            "layout": "duo",        # classic | duo | rings
             "options": ["cpu", "gpu", "ram", "vram", "disks", "liquid"],
             "interval": 10.0,      # secondes entre deux mises à jour (ou "asap")
         },
@@ -106,6 +112,11 @@ def load() -> dict:
         config["metadata"]["created"] = datetime.now().isoformat()
         return config
 
+    # Migration de schéma AVANT la fusion avec les défauts : un ancien
+    # `theme` devient `palette` (à l'identique) + `layout="classic"`,
+    # pour ne PAS changer le rendu d'une installation existante.
+    _migrate_config(config)
+
     # Fusionner avec les clés par défaut (pour conserver les nouvelles clés
     # introduites dans des versions ultérieures du schéma). La copie est
     # profonde : DEFAULT_CONFIG ne doit jamais être muté par un appelant.
@@ -121,6 +132,34 @@ def load() -> dict:
         merged["stick_order"] = []
 
     return merged
+
+
+def _migrate_config(config: dict) -> None:
+    """Migre en place un ``config.json`` ancien vers le schéma courant.
+
+    Règle retenue (documentée) :
+      - ancien ``kraken.display.theme`` présent et ``palette`` absent →
+        ``palette = theme`` (mêmes couleurs) et ``layout = "classic"``,
+        afin de préserver EXACTEMENT le rendu des installations existantes ;
+      - ``palette`` présent sans ``theme`` → ``theme = palette`` (miroir de
+        rétrocompatibilité) ;
+      - ni l'un ni l'autre → les défauts s'appliquent (``data_center`` +
+        ``layout="duo"``), c'est le cas d'une installation neuve.
+    """
+    if not isinstance(config, dict):
+        return
+    kraken = config.get("kraken")
+    if not isinstance(kraken, dict):
+        return
+    display = kraken.get("display")
+    if not isinstance(display, dict):
+        return
+
+    if "theme" in display and "palette" not in display:
+        display["palette"] = display["theme"]
+        display.setdefault("layout", "classic")
+    if "palette" in display and "theme" not in display:
+        display["theme"] = display["palette"]
 
 
 def _merge_into(target: dict, override: dict) -> None:

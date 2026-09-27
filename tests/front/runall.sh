@@ -45,9 +45,14 @@ PID="$(start_server)"; sleep 0.5
 run_mode "test=kraken" "kraken"
 stop_server "$PID"
 
-echo "── Scénarios vignettes (3 thèmes / 12 thèmes) ──"
+echo "── Scénario Kraken statut illisible (diagnostic) ──"
 PID="$(start_server)"; sleep 0.5
-run_mode "test=themes" "themes-3"
+run_mode "kraken=empty&test=kraken-empty" "kraken-empty"
+stop_server "$PID"
+
+echo "── Scénarios sélecteurs (5 palettes/3 dispositions ; 12/6) ──"
+PID="$(start_server)"; sleep 0.5
+run_mode "test=themes" "themes-5"
 stop_server "$PID"
 PID="$(start_server)"; sleep 0.5
 run_mode "themes=many&test=themes" "themes-12"

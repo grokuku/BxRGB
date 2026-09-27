@@ -33,16 +33,49 @@ const PNG_1x1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64');
 
-const REAL_THEMES = [
-  { key: 'data_center', label: 'Data Center', subtitle: 'Bleu Technique', default: true },
-  { key: 'overclock', label: 'Overclock', subtitle: 'Rouge Agressif', default: false },
-  { key: 'fluid_flow', label: 'Fluid Flow', subtitle: 'Bleu Pastel', default: false },
+const REAL_PALETTES = [
+  { key: 'data_center', label: 'Data Center', subtitle: 'Bleu Technique',
+    default: true, is_new: false,
+    colors: { bg: '#050f19', text: '#c8e6ff', accent: '#00a0ff',
+              gauge_bg: '#0a1e32', gauge_start: '#003c78', gauge_end: '#00b4ff' } },
+  { key: 'overclock', label: 'Overclock', subtitle: 'Rouge Agressif',
+    is_new: false,
+    colors: { bg: '#0f0505', text: '#f0f0f0', accent: '#ff0000',
+              gauge_bg: '#2d0a0a', gauge_start: '#960000', gauge_end: '#ff2828' } },
+  { key: 'fluid_flow', label: 'Fluid Flow', subtitle: 'Bleu Pastel',
+    is_new: false,
+    colors: { bg: '#19232d', text: '#e6f5ff', accent: '#78d2ff',
+              gauge_bg: '#32465a', gauge_start: '#a0d2ff', gauge_end: '#c8e6ff' } },
+  { key: 'graphite', label: 'Graphite', subtitle: 'Mono sobre · nouvelle',
+    is_new: true,
+    colors: { bg: '#101113', text: '#e8eaee', accent: '#aab1bc',
+              gauge_bg: '#262a30', gauge_start: '#606874', gauge_end: '#c4cbd6' } },
+  { key: 'amber', label: 'Amber', subtitle: 'Fort contraste · nouvelle',
+    is_new: true,
+    colors: { bg: '#0a0804', text: '#fff1d6', accent: '#ffb020',
+              gauge_bg: '#302008', gauge_start: '#b06000', gauge_end: '#ffc840' } },
 ];
-const FAKE_THEMES = Array.from({ length: 9 }, (_, i) => ({
-  key: `test_${String(i + 1).padStart(2, '0')}`,
-  label: `Test ${String(i + 1).padStart(2, '0')}`,
+const REAL_LAYOUTS = [
+  { key: 'duo', label: 'Duo', subtitle: 'Deux colonnes — valeurs XL',
+    default: true, is_new: true },
+  { key: 'classic', label: 'Classique', subtitle: 'Liste verticale — actuelle',
+    is_new: false },
+  { key: 'rings', label: 'Anneaux', subtitle: 'Jauges circulaires',
+    is_new: true },
+];
+const FAKE_PALETTES = Array.from({ length: 7 }, (_, i) => ({
+  key: `test_pal_${String(i + 1).padStart(2, '0')}`,
+  label: `Palette ${String(i + 1).padStart(2, '0')}`,
   subtitle: `Variante ${String(i + 1).padStart(2, '0')}`,
-  default: false,
+  default: false, is_new: true,
+  colors: { bg: '#0b0e14', text: '#c8d2e0', accent: '#8a93a6',
+            gauge_bg: '#20242e', gauge_start: '#3a4150', gauge_end: '#8a93a6' },
+}));
+const FAKE_LAYOUTS = Array.from({ length: 3 }, (_, i) => ({
+  key: `test_lay_${String(i + 1).padStart(2, '0')}`,
+  label: `Disposition ${String(i + 1).padStart(2, '0')}`,
+  subtitle: `Variante ${String(i + 1).padStart(2, '0')}`,
+  default: false, is_new: true,
 }));
 
 function freshState() {
@@ -60,10 +93,12 @@ function freshState() {
     animation: { running: false, effect: null, speed: 1.0, framerate: 30, refresh: 20 },
     lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
     display: { running: false, mode: null, theme: 'data_center',
+               palette: 'data_center', layout: 'duo',
                options: ['cpu', 'gpu', 'ram', 'vram', 'disks', 'liquid'],
                interval: 10.0 },
     galleryFiles: [],
     themesParam: '3',
+    krakenMode: null,
     apiCalls: [],
     thumbRequests: [],
     previewGenerations: 0,
@@ -81,6 +116,7 @@ function savedPayload(sticks) {
     kraken: {
       lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
       display: { mode: null, theme: 'data_center',
+                 palette: 'data_center', layout: 'duo',
                  options: ['cpu', 'gpu', 'ram', 'vram', 'disks', 'liquid'],
                  interval: 10.0 },
     },
@@ -89,9 +125,12 @@ function savedPayload(sticks) {
 
 let S = freshState();
 
-function themesForRequest() {
-  const many = S.themesParam === 'many' || parseInt(S.themesParam, 10) > 3;
-  return many ? REAL_THEMES.concat(FAKE_THEMES) : REAL_THEMES.slice();
+function catalogForRequest() {
+  const many = S.themesParam === 'many' || parseInt(S.themesParam, 10) > 5;
+  return {
+    palettes: many ? REAL_PALETTES.concat(FAKE_PALETTES) : REAL_PALETTES.slice(),
+    layouts: many ? REAL_LAYOUTS.concat(FAKE_LAYOUTS) : REAL_LAYOUTS.slice(),
+  };
 }
 
 function publicStick(s) {
@@ -236,9 +275,28 @@ async function handleApi(req, res, u) {
   }
 
   if (p === '/api/kraken/status') {
+    if (S.krakenMode === 'empty') {
+      // Statut « illisible » (le bug vécu) : tirets + diagnostic côté front.
+      return json(res, 200, {
+        available: true, detected: true,
+        devices: ['Device #0: NZXT Kraken Z (Z53, Z63 or Z73)',
+                  'Device #1: ASUS Aura LED Controller'],
+        status: {},
+        status_ok: true,
+        status_missing: ['liquid_temperature', 'pump_speed', 'fan_speed'],
+        status_source: 'text',
+        status_raw: 'NZXT Kraken Z (Z53, Z63 or Z73)\n' +
+                    '├── Liquid temperature  N/A\n' +
+                    '├── Fan speed           N/A\n' +
+                    '└── Pump speed          N/A',
+        error: 'Sortie liquidctl non reconnue : aucune valeur extraite ' +
+               '(source=text) — voir la sortie brute',
+      });
+    }
     return json(res, 200, {
       available: true, detected: true, devices: ['NZXT Kraken Z53'],
       status: { liquid_temperature: 32.4, pump_speed: 2100, fan_speed: 1200 },
+      status_ok: true, status_missing: [], status_source: 'text',
       status_raw: '', error: null,
     });
   }
@@ -264,7 +322,9 @@ async function handleApi(req, res, u) {
     return json(res, 200, {
       running: S.display.running,
       mode: S.display.mode,
-      theme: S.display.theme,
+      theme: S.display.palette || S.display.theme,
+      palette: S.display.palette,
+      layout: S.display.layout,
       options: S.display.options,
       interval: S.display.interval,
     });
@@ -272,6 +332,8 @@ async function handleApi(req, res, u) {
   if (p === '/api/kraken/display/update' && req.method === 'POST') {
     if (body.interval !== undefined) S.display.interval = body.interval;
     if (body.theme !== undefined) S.display.theme = body.theme;
+    if (body.palette !== undefined) S.display.palette = body.palette;
+    if (body.layout !== undefined) S.display.layout = body.layout;
     if (body.options !== undefined) S.display.options = body.options;
     return json(res, 200, Object.assign({ ok: true, restarted: false }, S.display));
   }
@@ -284,6 +346,8 @@ async function handleApi(req, res, u) {
     S.display.running = true;
     S.display.mode = 'monitor';
     if (body.theme !== undefined) S.display.theme = body.theme;
+    if (body.palette !== undefined) S.display.palette = body.palette;
+    if (body.layout !== undefined) S.display.layout = body.layout;
     if (body.options !== undefined) S.display.options = body.options;
     if (body.interval !== undefined) S.display.interval = body.interval;
     return json(res, 200, { ok: true });
@@ -317,16 +381,46 @@ async function handleApi(req, res, u) {
   }
 
   if (p === '/api/kraken/themes' && req.method === 'GET') {
-    const themes = themesForRequest();
-    return json(res, 200, { ok: true, themes, count: themes.length, error: null });
+    const cat = catalogForRequest();
+    const themes = cat.palettes.map((x) => ({
+      key: x.key, label: x.label, subtitle: x.subtitle, default: !!x.default,
+    }));
+    return json(res, 200, {
+      ok: true, themes, palettes: cat.palettes, layouts: cat.layouts,
+      count: themes.length, palette_count: cat.palettes.length,
+      layout_count: cat.layouts.length, error: null,
+    });
   }
-  mm = m(/^\/api\/kraken\/themes\/([^/]+)\/thumb\.png$/);
+  if (p === '/api/kraken/palettes' && req.method === 'GET') {
+    const cat = catalogForRequest();
+    return json(res, 200, { ok: true, palettes: cat.palettes,
+                            count: cat.palettes.length, error: null });
+  }
+  if (p === '/api/kraken/layouts' && req.method === 'GET') {
+    const cat = catalogForRequest();
+    return json(res, 200, { ok: true, layouts: cat.layouts,
+                            count: cat.layouts.length, error: null });
+  }
+  // Vignettes génériques palette/disposition (mêmes clés disjointes).
+  mm = m(/^\/api\/kraken\/(?:themes|palettes)\/([^/]+)\/thumb\.png$/);
   if (mm) {
     const key = decodeURIComponent(mm[1]);
-    const known = themesForRequest().some((t) => t.key === key);
-    if (!known) return json(res, 404, { detail: `Thème inconnu : ${key}` });
-    S.thumbRequests.push({ key, at: Date.now() });
+    const cat = catalogForRequest();
+    if (!cat.palettes.some((x) => x.key === key)) {
+      return json(res, 404, { detail: `Palette ou disposition inconnue : ${key}` });
+    }
+    S.thumbRequests.push({ key, kind: 'palette', at: Date.now() });
     return sendFixture(res, `${key}.png`, 'image/png', 150, 150);
+  }
+  mm = m(/^\/api\/kraken\/layouts\/([^/]+)\/thumb\.png$/);
+  if (mm) {
+    const key = decodeURIComponent(mm[1]);
+    const cat = catalogForRequest();
+    if (!cat.layouts.some((x) => x.key === key)) {
+      return json(res, 404, { detail: `Palette ou disposition inconnue : ${key}` });
+    }
+    S.thumbRequests.push({ key, kind: 'layout', at: Date.now() });
+    return sendFixture(res, `layout-${key}.png`, 'image/png', 150, 150);
   }
 
   return json(res, 404, { detail: `route mock inconnue : ${req.method} ${p}` });
@@ -368,6 +462,9 @@ function serveStatic(req, res, u) {
     // Mémorise le paramètre ?themes= pour /api/kraken/themes.
     const themesParam = u.searchParams.get('themes');
     if (themesParam) S.themesParam = themesParam;
+    // Mémorise ?kraken=empty pour /api/kraken/status.
+    const krakenParam = u.searchParams.get('kraken');
+    if (krakenParam) S.krakenMode = krakenParam;
     let html = fs.readFileSync(file, 'utf8');
     html = html.replace('</head>',
       '<script src="/__test.js"></script></head>');

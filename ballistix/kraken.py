@@ -16,19 +16,28 @@ Références liquidctl pour les Kraken Z :
 
 import base64
 import hashlib
+import inspect
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+_logger = logging.getLogger(__name__)
+
 # ── Constantes ───────────────────────────────────────────────────────
 
 LIQUIDCTL_CMD = "liquidctl"
 NZXT_VENDOR_ID = "1e71"
-KRAKEN_MATCH = "NZXT"          # Filtre --match pour sélectionner le Kraken
+# Filtre --match : toutes les descriptions liquidctl des Kraken contiennent
+# « Kraken ». Le seul vendor (« NZXT ») matcherait aussi d'autres devices
+# NZXT (RGB controller, HUE…) et rendrait la sélection ambiguë ; la
+# description est plus fiable qu'un index de device supposé.
+KRAKEN_MATCH = "Kraken"
 CMD_TIMEOUT = 15               # secondes
 STORE_DIR_NAME = "kraken"      # Sous-dossier dans ~/.config/ballistix/
 IMAGE_NAME = "screen.png"
@@ -38,7 +47,7 @@ BACKUP_DIR_NAME = "backups"    # Sauvegardes temporaires (annulabilité Save/Can
 TRASH_DIR_NAME = "trash"       # Corbeille des suppressions de gallery
 SESSION_FILE_NAME = "session.json"  # Journal de session (fichiers ajoutés)
 THUMBS_DIR_NAME = "thumbs"     # Cache disque des vignettes de thèmes (API web)
-THUMB_ENGINE_VERSION = 1       # À incrémenter si la mécanique de vignette change
+THUMB_ENGINE_VERSION = 2       # À incrémenter si la mécanique de vignette change
 
 # ── Cadence d'actualisation ─────────────────────────────────────────
 # liquidctl ne sait pas pousser plusieurs images par seconde : chaque image
@@ -66,7 +75,9 @@ _settings = {
     },
     "display": {
         "mode": None,              # None | "monitor" | "gallery"
-        "theme": "data_center",
+        "theme": "data_center",    # miroir historique de `palette`
+        "palette": "data_center",  # data_center | overclock | fluid_flow | graphite | amber
+        "layout": "duo",           # classic | duo | rings (défaut : grand format)
         "options": list(DEFAULT_OPTIONS),
         "interval": DEFAULT_INTERVAL,
     },
@@ -94,6 +105,10 @@ def kraken_update_settings(lcd: dict = None, display: dict = None) -> dict:
     Appelé à chaque opération réussie sur le matériel, et par le serveur
     au démarrage / au restore pour aligner la mémoire sur la référence.
 
+    Rétrocompatibilité « thème » : un ``display`` ne contenant que
+    ``theme`` est interprété comme ``palette=theme`` + ``layout="classic"``
+    (rendu historique). ``theme`` reste un miroir de ``palette``.
+
     Returns:
         L'état mémoire complet après mise à jour.
     """
@@ -101,7 +116,21 @@ def kraken_update_settings(lcd: dict = None, display: dict = None) -> dict:
         if isinstance(lcd, dict):
             _settings["lcd"].update(lcd)
         if isinstance(display, dict):
-            _settings["display"].update(display)
+            incoming = dict(display)
+            if "theme" in incoming and "palette" not in incoming:
+                incoming["palette"] = incoming["theme"]
+                incoming.setdefault("layout", "classic")
+            if "palette" in incoming and "theme" not in incoming:
+                incoming["theme"] = incoming["palette"]
+            _settings["display"].update(incoming)
+            # Garantit la présence des clés du nouveau modèle.
+            disp = _settings["display"]
+            if "palette" not in disp:
+                disp["palette"] = disp.get("theme", "data_center")
+            if "theme" not in disp:
+                disp["theme"] = disp["palette"]
+            if "layout" not in disp:
+                disp["layout"] = "duo"
     return kraken_get_settings()
 
 
@@ -217,41 +246,55 @@ def _render_engine_key() -> str:
     return f"v{THUMB_ENGINE_VERSION}-{digest}"
 
 
-def kraken_theme_thumb(theme_key: str) -> dict:
-    """Chemin de la vignette PNG d'un thème (cache disque + régénération).
+def kraken_theme_thumb(key: str) -> dict:
+    """Chemin de la vignette PNG d'une PALETTE ou d'une DISPOSITION.
 
-    Retourne ``{"ok", "path", "cached", "error", "code"}`` ; ``code``
-    vaut ``"unknown"`` (thème inconnu), ``"unavailable"`` (Pillow absent)
-    ou ``"render"`` (échec de génération). Une vignette déjà en cache
-    n'est jamais régénérée tant que l'empreinte du moteur ne change pas.
+    Un seul endpoint sert les deux catalogues : ``key`` est résolu tour à
+    tour comme clé de palette (vignette rendue en disposition « classic »,
+    comme les vignettes historiques) ou de disposition (rendue avec la
+    palette par défaut). Cache disque + régénération comme avant.
+
+    Retourne ``{"ok", "path", "cached", "error", "code", "kind"}`` ;
+    ``code`` vaut ``"unknown"`` (clé inconnue), ``"unavailable"``
+    (Pillow absent) ou ``"render"`` (échec de génération). Une vignette
+    déjà en cache n'est jamais régénérée tant que l'empreinte du moteur
+    ne change pas.
     """
     try:
-        from .monitor import PIL_AVAILABLE, THEMES, render_theme_thumbnail
+        from .monitor import (
+            PIL_AVAILABLE, PALETTES, LAYOUTS,
+            render_theme_thumbnail, render_layout_thumbnail,
+        )
     except ImportError:
-        return {"ok": False, "path": None, "cached": False,
+        return {"ok": False, "path": None, "cached": False, "kind": None,
                 "error": "Module de monitoring indisponible",
                 "code": "unavailable"}
 
-    if theme_key not in THEMES:
-        return {"ok": False, "path": None, "cached": False,
-                "error": f"Thème inconnu : {theme_key}", "code": "unknown"}
+    if key in PALETTES:
+        kind, prefix, renderer = "palette", "", render_theme_thumbnail
+    elif key in LAYOUTS:
+        kind, prefix, renderer = "layout", "layout-", render_layout_thumbnail
+    else:
+        return {"ok": False, "path": None, "cached": False, "kind": None,
+                "error": f"Palette ou disposition inconnue : {key}",
+                "code": "unknown"}
     if not PIL_AVAILABLE:
-        return {"ok": False, "path": None, "cached": False,
+        return {"ok": False, "path": None, "cached": False, "kind": kind,
                 "error": "Pillow manquant", "code": "unavailable"}
 
     thumbs = _thumbs_dir()
-    dest = thumbs / f"{theme_key}-{_render_engine_key()}.png"
+    dest = thumbs / f"{prefix}{key}-{_render_engine_key()}.png"
     if dest.is_file() and dest.stat().st_size > 0:
         return {"ok": True, "path": str(dest), "cached": True,
-                "error": None, "code": None}
+                "error": None, "code": None, "kind": kind}
 
     temp = thumbs / f"{dest.name}.tmp"
-    if not render_theme_thumbnail(theme_key, str(temp)):
+    if not renderer(key, str(temp)):
         try:
             temp.unlink()
         except OSError:
             pass
-        return {"ok": False, "path": None, "cached": False,
+        return {"ok": False, "path": None, "cached": False, "kind": kind,
                 "error": "Échec du rendu de la vignette", "code": "render"}
     try:
         os.replace(temp, dest)
@@ -260,19 +303,29 @@ def kraken_theme_thumb(theme_key: str) -> dict:
             temp.unlink()
         except OSError:
             pass
-        return {"ok": False, "path": None, "cached": False,
+        return {"ok": False, "path": None, "cached": False, "kind": kind,
                 "error": f"Écriture impossible : {e}", "code": "render"}
 
-    # Ménage : les vignettes d'une ancienne empreinte pour ce thème.
+    # Ménage : les vignettes d'une ancienne empreinte pour cette clé.
     try:
-        for old in thumbs.glob(f"{theme_key}-*.png"):
+        for old in thumbs.glob(f"{prefix}{key}-*.png"):
             if old.name != dest.name:
                 old.unlink()
     except OSError:
         pass
 
     return {"ok": True, "path": str(dest), "cached": False,
-            "error": None, "code": None}
+            "error": None, "code": None, "kind": kind}
+
+
+def kraken_palette_thumb(palette_key: str) -> dict:
+    """Vignette d'une palette (alias explicite de l'endpoint générique)."""
+    return kraken_theme_thumb(palette_key)
+
+
+def kraken_layout_thumb(layout_key: str) -> dict:
+    """Vignette d'une disposition (alias explicite de l'endpoint générique)."""
+    return kraken_theme_thumb(layout_key)
 
 
 def kraken_purge_thumbs() -> dict:
@@ -485,63 +538,280 @@ def kraken_detect() -> dict:
 
 # ── Statut ───────────────────────────────────────────────────────────
 
+# Clés du statut exposées par l'API (le front les affiche toutes).
+STATUS_FIELDS = ("liquid_temperature", "pump_speed", "fan_speed")
+
+# Libellés liquidctl → clé interne. Les libellés réels sont multi-mots
+# (« Liquid temperature », « Fan speed », « Pump speed ») et ont varié
+# selon les versions/modèles (Kraken X plat, Kraken Z en arbre, JSON).
+# Les patterns sont testés du plus spécifique au plus générique, sans
+# tenir compte de la casse, sur la ligne COMPLÈTE.
+_STATUS_LABEL_PATTERNS = {
+    "liquid_temperature": (
+        "liquid temperature", "coolant temperature", "water temperature",
+        "temperature", "temp",
+    ),
+    "pump_speed": ("pump speed", "pump rpm"),
+    "fan_speed": ("fan speed", "fan rpm"),
+}
+
+# Libellés français des clés (messages d'avertissement côté serveur).
+STATUS_FIELD_LABELS = {
+    "liquid_temperature": "température liquide",
+    "pump_speed": "vitesse pompe",
+    "fan_speed": "vitesse ventilos",
+}
+
+# Préfixes d'arbre / puces des sorties liquidctl : « ├── », « └── », « │ »,
+# « |-- », « +-- », tirets, espaces (dont insécables).
+_TREE_PREFIX_CHARS = " \t\u00a0\u202f│├└┌┐┘┤┬┴─═╌╭╰|+`-–—"
+
+# Nombre : signe optionnel, milliers (espaces fines/insécables) puis
+# décimales . ou , (localisation). Le premier groupe évite de tronquer
+# « 2 117 rpm » en « 2 » ; le suffixe répétable capture les deux
+# séparateurs des formats mixtes (« 1.234,5 » → 1234,5).
+_NUMBER_RE = re.compile(
+    r"[-+]?\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)*"
+    r"|[-+]?\d+(?:[.,]\d+)*"
+)
+
+
+def _parse_float(value):
+    """Extrait un nombre d'une valeur type ``'35.2°C'``, ``'2 117 rpm'``, ``35.2``.
+
+    Tolère unités collées ou séparées, milliers espacés, virgule décimale,
+    signe et espaces insécables. Retourne ``None`` si aucun nombre n'est
+    trouvé — jamais d'exception, jamais de zéro inventé.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace("\u00a0", " ").replace("\u202f", " ")
+    match = _NUMBER_RE.search(text)
+    if not match:
+        return None
+    return _number_to_float(match.group())
+
+
+def _number_to_float(token: str):
+    """Normalise un jeton numérique (milliers, virgule décimale) en float."""
+    token = token.replace(" ", "")
+    if "," in token and "." in token:
+        # Le DERNIER séparateur est la décimale, l'autre un millier.
+        if token.rfind(",") > token.rfind("."):
+            token = token.replace(".", "").replace(",", ".")
+        else:
+            token = token.replace(",", "")
+    elif "," in token:
+        entier, _, fraction = token.partition(",")
+        # « 35,2 » → décimale ; « 2,117 » → milliers. Les valeurs liquidctl
+        # n'utilisent jamais de milliers : un groupe de 3 chiffres
+        # exactement est la signature d'un séparateur de milliers.
+        token = entier + ("." if len(fraction) != 3 else "") + fraction
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _classify_status_label(label: str):
+    """Associe un libellé liquidctl (« Liquid temperature »…) à une clé."""
+    if not label:
+        return None
+    low = label.lower()
+    for key, patterns in _STATUS_LABEL_PATTERNS.items():
+        if any(pattern in low for pattern in patterns):
+            return key
+    return None
+
+
+def _value_for_label(text: str, key: str):
+    """Valeur numérique qui SUIT le libellé ``key`` dans ``text``.
+
+    On cherche après le libellé pour ne jamais capturer un chiffre contenu
+    dans le libellé lui-même (ex. « LED 1 »).
+    """
+    low = text.lower()
+    for pattern in _STATUS_LABEL_PATTERNS[key]:
+        idx = low.find(pattern)
+        if idx >= 0:
+            return _parse_float(text[idx + len(pattern):])
+    return None
+
+
+def _parse_status_text(raw: str) -> dict:
+    """Extrait les capteurs d'une sortie ``liquidctl status`` en texte.
+
+    Tolérant par construction : arborescence ├──/└──/│ ou « |-- », casse
+    libre, espaces multiples, libellés multi-mots, unités collées ou
+    séparées, décimales . ou ,. Retourne ``{clé: float}`` pour les seules
+    valeurs reconnues ET numériques ; les autres restent ABSENTES (le
+    statut les signalera comme indisponibles, sans les confondre avec 0).
+    """
+    data = {}
+    for line in (raw or "").splitlines():
+        cleaned = line.strip().lstrip(_TREE_PREFIX_CHARS)
+        if not cleaned:
+            continue
+        key = _classify_status_label(cleaned)
+        if key is None or key in data:
+            continue
+        number = _value_for_label(cleaned, key)
+        if number is not None:
+            data[key] = number
+    return data
+
+
+def _iter_status_entries(status):
+    """Parcourt un statut JSON en paires (libellé, valeur).
+
+    Deux formes acceptées : la forme RÉELLE de ``liquidctl status --json``
+    (liste de ``{"key", "value", "unit"}``) et la variante dict
+    ``{label: valeur | {"value": …}}`` (robustesse/versions futures).
+    """
+    if isinstance(status, dict):
+        for label, entry in status.items():
+            if isinstance(entry, dict) and "value" in entry:
+                yield str(label), entry["value"]
+            else:
+                yield str(label), entry
+    elif isinstance(status, list):
+        for entry in status:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("key", entry.get("label"))
+            if label is None:
+                continue
+            yield str(label), entry.get("value")
+
+
+def _parse_status_json(raw: str):
+    """Extrait les capteurs d'une sortie ``liquidctl status --json``.
+
+    Accepte la liste de devices (format documenté), un objet unique, ou
+    un dict direct. Retourne ``(data, reconnu)`` : ``reconnu`` distingue
+    « ce n'était pas du JSON liquidctl » (→ repli texte) de « du JSON
+    sans les valeurs » (→ indisponibilité explicite).
+    """
+    if not raw or not raw.strip():
+        return {}, False
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}, False
+
+    devices = payload if isinstance(payload, list) else [payload]
+    data = {}
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        status = device.get("status")
+        if not isinstance(status, (dict, list)):
+            continue
+        for label, value in _iter_status_entries(status):
+            key = _classify_status_label(label)
+            if key is None or key in data:
+                continue
+            if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+                continue  # listes (canaux RGB…), None, booléens
+            number = _parse_float(value)
+            if number is not None:
+                data[key] = number
+    return data, True
+
+
+# Support de `liquidctl status --json` (liquidctl ≥ 1.5) : inconnu au
+# premier appel, puis mémorisé pour la session — évite un double
+# subprocess à chaque interrogation si la version ne le supporte pas.
+_json_status_probe = None
+
+
+def _status_command(use_json: bool):
+    """Commande `liquidctl status` (JSON ou texte), filtre Kraken inclus."""
+    args = [LIQUIDCTL_CMD, "--match", KRAKEN_MATCH, "status"]
+    if use_json:
+        args.append("--json")
+    return args
+
+
 def kraken_status() -> dict:
     """Récupère le statut du Kraken (température liquide, vitesses).
 
-    Retourne {"ok": bool, "data": {...}, "raw": str, "error": str|None}.
+    La sortie de ``liquidctl status`` est préférée en JSON (``--json``,
+    le plus robuste aux variations de format), avec repli sur le texte
+    (parseur tolérant : arbre/plat, libellés multi-mots, unités,
+    décimales).
+
+    Retourne ``{"ok", "data", "raw", "error", "missing", "source"}`` :
+    - ``ok`` : la commande liquidctl a RÉUSSI (pas « toutes les valeurs
+      trouvées ») ; ``data`` reste vide en cas d'échec ;
+    - ``data`` : valeurs extraites ; une clé ABSENTE est indisponible —
+      jamais remplacée par un zéro (0 est une valeur légitime) ;
+    - ``error`` : None si complet, sinon explication (échec commande,
+      sortie non reconnue, valeurs non remontées) — aussi journalisée ;
+    - ``missing`` : clés de ``STATUS_FIELDS`` non extraites ;
+    - ``source`` : "json" | "text" (None si la commande a échoué).
     """
     if not kraken_available():
         return {
-            "ok": False,
-            "data": {},
-            "raw": "",
+            "ok": False, "data": {}, "raw": "",
             "error": "liquidctl n'est pas installé",
+            "missing": list(STATUS_FIELDS), "source": None,
         }
 
-    result = _run_cmd([LIQUIDCTL_CMD, "--match", KRAKEN_MATCH, "status"])
-    if not result["ok"]:
-        return {
-            "ok": False,
-            "data": {},
-            "raw": result["stdout"] or result["stderr"],
-            "error": result["stderr"] or "liquidctl status a échoué",
-        }
+    global _json_status_probe
+    data, raw, source = {}, "", None
 
-    # Parse la sortie texte de liquidctl status :
-    #   NZXT Kraken Z (Z53, Z63 or Z73)
-    #   ├── Liquid temperature     35.2°C
-    #   ├── Fan speed               1200 rpm
-    #   └── Pump speed              2100 rpm
-    data = {}
-    for line in result["stdout"].splitlines():
-        line = line.strip().lstrip("├└│─ ")
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        key = parts[0].strip()
-        value = parts[1].strip()
-        if "temperature" in key.lower() or "temp" in key.lower():
-            data["liquid_temperature"] = _parse_float(value)
-        elif "fan" in key.lower() and "speed" in key.lower():
-            data["fan_speed"] = _parse_float(value)
-        elif "pump" in key.lower() and "speed" in key.lower():
-            data["pump_speed"] = _parse_float(value)
+    # 1) Tentative JSON (`liquidctl status --json`) si la version le supporte.
+    if _json_status_probe is not False:
+        result = _run_cmd(_status_command(True))
+        if result["ok"]:
+            data, recognized = _parse_status_json(result["stdout"])
+            if recognized:
+                _json_status_probe = True
+                raw, source = result["stdout"], "json"
+            else:
+                _json_status_probe = False
+                _logger.debug(
+                    "liquidctl status --json non exploitable (code=%s) : repli texte",
+                    result["code"])
+        else:
+            _json_status_probe = False
+            _logger.debug(
+                "liquidctl status --json indisponible (code=%s, stderr=%r) : repli texte",
+                result["code"], result["stderr"][:200])
+
+    # 2) Repli texte (toutes versions confondues).
+    if source is None:
+        result = _run_cmd(_status_command(False))
+        if not result["ok"]:
+            error = result["stderr"] or "liquidctl status a échoué"
+            _logger.warning("liquidctl status a échoué (code=%s) : %s",
+                            result["code"], error[:300])
+            return {
+                "ok": False, "data": {}, "raw": result["stdout"] or result["stderr"],
+                "error": error, "missing": list(STATUS_FIELDS), "source": None,
+            }
+        data = _parse_status_text(result["stdout"])
+        raw, source = result["stdout"], "text"
+
+    # 3) Indisponibilité EXPLICITE : ne jamais rendre des tirets muets.
+    missing = [k for k in STATUS_FIELDS if k not in data]
+    error = None
+    if len(missing) == len(STATUS_FIELDS):
+        error = ("Sortie liquidctl non reconnue : aucune valeur extraite "
+                 f"(source={source}) — voir la sortie brute")
+    elif missing:
+        details = ", ".join(STATUS_FIELD_LABELS[k] for k in missing)
+        error = f"Valeurs non remontées par liquidctl : {details}"
+    if error:
+        _logger.warning("Kraken : %s", error)
 
     return {
-        "ok": True,
-        "data": data,
-        "raw": result["stdout"],
-        "error": None,
+        "ok": True, "data": data, "raw": raw,
+        "error": error, "missing": missing, "source": source,
     }
-
-
-def _parse_float(value: str):
-    """Extrait le nombre flottant d'une chaîne type '35.2°C'."""
-    import re
-    m = re.search(r"[-+]?\d*\.?\d+", value)
-    return float(m.group()) if m else None
 
 
 # ── Actions ──────────────────────────────────────────────────────────
@@ -887,20 +1157,47 @@ def kraken_gallery_start(interval: float = DEFAULT_INTERVAL) -> dict:
     return {"ok": True, "message": f"Diaporama démarré ({len(files)} fichier(s), {_interval_label(interval)})"}
 
 
-def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = "data_center", options: list = None) -> dict:
+def _render_monitor_frame(stats, path, palette, layout, options, now=None) -> bool:
+    """Appelle le moteur de rendu (palette × disposition).
+
+    Un test peut remplacer ``render_monitoring_image`` par un faux de
+    l'ANCIENNE signature (``theme_name`` positionnel) : on adapte l'appel
+    selon les paramètres réellement exposés.
+    """
+    from .monitor import render_monitoring_image
+    try:
+        params = inspect.signature(render_monitoring_image).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "layout" in params and "palette" in params:
+        return render_monitoring_image(
+            stats, path, options=options, now=now, palette=palette, layout=layout
+        )
+    return render_monitoring_image(stats, path, palette, options)
+
+
+def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = None,
+                         options: list = None, palette: str = None,
+                         layout: str = None) -> dict:
     """Démarre le monitoring : génère une image de stats et l'envoie.
 
     Nécessite Pillow + psutil (module ballistix.monitor). ``interval``
     accepte la sentinelle ``"asap"`` (aucune attente entre deux images).
+    Le rendu combine ``palette`` × ``layout`` × ``options`` ; l'ancien
+    paramètre ``theme`` reste accepté (→ palette, layout inchangé).
     """
     try:
-        from .monitor import collect_system_stats, render_monitoring_image, monitor_available
+        from .monitor import collect_system_stats, monitor_available
     except ImportError:
         return {"ok": False, "error": "Module de monitoring indisponible (Pillow/psutil manquants)"}
 
     if not monitor_available():
         return {"ok": False, "error": "Pillow et/ou psutil ne sont pas installés — le mode monitoring est indisponible"}
 
+    with _state_lock:
+        current = dict(_settings["display"])
+    new_palette = palette or theme or current.get("palette") or "data_center"
+    new_layout = layout or current.get("layout") or "duo"
     interval = normalize_interval(interval)
     options = _normalize_options(options)
     screen_path = str(_store_dir() / "monitor.png")
@@ -916,7 +1213,8 @@ def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = "data_
                     stats["liquid_temp"] = s["data"]["liquid_temperature"]
             except Exception:
                 pass
-            if render_monitoring_image(stats, screen_path, theme, options):
+            if _render_monitor_frame(stats, screen_path, new_palette,
+                                     new_layout, options):
                 kraken_set_lcd_image(screen_path, animated=False)
             # Date-butoir : le rendu + le push liquidctl sont décomptés.
             elapsed = time.monotonic() - cycle_start
@@ -925,11 +1223,14 @@ def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = "data_
     _start_display_thread(_monitor_loop, "kraken-monitor")
     kraken_update_settings(display={
         "mode": "monitor",
-        "theme": theme,
+        "theme": new_palette,
+        "palette": new_palette,
+        "layout": new_layout,
         "options": options,
         "interval": interval,
     })
-    return {"ok": True, "message": f"Monitoring démarré ({theme}, {_interval_label(interval)})"}
+    return {"ok": True,
+            "message": f"Monitoring démarré ({new_palette}/{new_layout}, {_interval_label(interval)})"}
 
 
 def _interval_label(interval) -> str:
@@ -939,13 +1240,14 @@ def _interval_label(interval) -> str:
     return f"une image toutes les {float(interval):.0f}s"
 
 
-def kraken_display_reconfigure(interval=None, theme=None, options=None) -> dict:
+def kraken_display_reconfigure(interval=None, theme=None, options=None,
+                               palette=None, layout=None) -> dict:
     """Applique en TEMPS RÉEL des réglages d'affichage (sans changer de mode).
 
-    l'état mémoire est toujours mis à jour (thème/capteurs/intervalle) :
-    c'est lui que POST /api/save fige dans la référence. Si un thread
-    d'affichage tourne, il est RELANCÉ avec les nouveaux paramètres (le
-    dé-bounce ~400 ms est fait côté front pour éviter la rafale).
+    l'état mémoire est toujours mis à jour (palette/disposition/capteurs/
+    intervalle) : c'est lui que POST /api/save fige dans la référence. Si un
+    thread d'affichage tourne, il est RELANCÉ avec les nouveaux paramètres
+    (le dé-bounce ~400 ms est fait côté front pour éviter la rafale).
 
     Returns:
         L'état d'affichage résultant + ``restarted`` (thread relancé ?).
@@ -957,13 +1259,16 @@ def kraken_display_reconfigure(interval=None, theme=None, options=None) -> dict:
     new_interval = (normalize_interval(interval)
                     if interval is not None
                     else current.get("interval", DEFAULT_INTERVAL))
-    new_theme = theme if isinstance(theme, str) and theme else current.get("theme", "data_center")
+    new_palette = palette or theme or current.get("palette") or "data_center"
+    new_layout = layout or current.get("layout") or "duo"
     new_options = (_normalize_options(options)
                    if options is not None
                    else list(current.get("options") or DEFAULT_OPTIONS))
 
     kraken_update_settings(display={
-        "theme": new_theme,
+        "theme": new_palette,
+        "palette": new_palette,
+        "layout": new_layout,
         "options": new_options,
         "interval": new_interval,
     })
@@ -971,7 +1276,8 @@ def kraken_display_reconfigure(interval=None, theme=None, options=None) -> dict:
     running = _display_thread_status().get("running")
     restarted = False
     if running and mode == "monitor":
-        res = kraken_monitor_start(new_interval, theme=new_theme, options=new_options)
+        res = kraken_monitor_start(new_interval, palette=new_palette,
+                                   layout=new_layout, options=new_options)
         restarted = bool(res.get("ok"))
     elif running and mode == "gallery":
         res = kraken_gallery_start(new_interval)
@@ -1014,25 +1320,34 @@ def kraken_pending_changes() -> dict:
     }
 
 
-def kraken_monitor_preview(theme: str = "data_center", options: list = None) -> dict:
+def kraken_monitor_preview(theme: str = None, options: list = None,
+                           palette: str = None, layout: str = None) -> dict:
     """Génère une image de monitoring de test (pour l'aperçu web).
+
+    Combine ``palette`` × ``layout`` × ``options`` (le rendu de la
+    combinaison courante). L'ancien paramètre ``theme`` reste accepté.
 
     Retourne {"ok": bool, "path": str|None, "error": str|None}.
     """
     try:
-        from .monitor import collect_system_stats, render_monitoring_image, monitor_available
+        from .monitor import collect_system_stats, monitor_available
     except ImportError:
         return {"ok": False, "path": None, "error": "Module de monitoring indisponible"}
     if not monitor_available():
         return {"ok": False, "path": None, "error": "Pillow/psutil manquants"}
 
     try:
+        with _state_lock:
+            current = dict(_settings["display"])
+        new_palette = palette or theme or current.get("palette") or "data_center"
+        new_layout = layout or current.get("layout") or "duo"
         stats = collect_system_stats()
         s = kraken_status()
         if s["ok"] and s["data"].get("liquid_temperature") is not None:
             stats["liquid_temp"] = s["data"]["liquid_temperature"]
         path = str(_store_dir() / "monitor_preview.png")
-        ok = render_monitoring_image(stats, path, theme, options)
-        return {"ok": ok, "path": path if ok else None, "error": None if ok else "Rendu impossible"}
+        ok = _render_monitor_frame(stats, path, new_palette, new_layout, options)
+        return {"ok": ok, "path": path if ok else None,
+                "error": None if ok else "Rendu impossible"}
     except Exception as e:
         return {"ok": False, "path": None, "error": str(e)}

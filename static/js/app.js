@@ -778,6 +778,47 @@ async function performUpdate() {
    Kraken NZXT
    ═══════════════════════════════════════════════════════════ */
 
+/** Capteurs du statut Kraken (miroir de ballistix/kraken.py:STATUS_FIELDS). */
+const KRAKEN_FIELDS = ['liquid_temperature', 'pump_speed', 'fan_speed'];
+const KRAKEN_FIELD_LABELS = {
+  liquid_temperature: 'température liquide',
+  pump_speed: 'vitesse pompe',
+  fan_speed: 'vitesse ventilos',
+};
+
+/** Explique les « — » du statut Kraken : cause, sortie brute, commande à lancer.
+ *
+ * Rétro-compatible : si le serveur ne fournit pas status_missing, les clés
+ * absentes sont déduites des valeurs reçues. N'affiche rien quand toutes
+ * les valeurs sont présentes. */
+function appendKrakenStatusDiagnostic(el, data) {
+  const st = data.status || {};
+  const missing = Array.isArray(data.status_missing)
+    ? data.status_missing
+    : KRAKEN_FIELDS.filter((k) => st[k] === null || st[k] === undefined);
+  const noneAvailable = missing.length === KRAKEN_FIELDS.length;
+  if (data.error || data.status_ok === false || noneAvailable) {
+    const cause = data.error || 'Aucune valeur remontée par liquidctl';
+    el.innerHTML += `
+      <div class="kraken-status-error">
+        ⚠ <strong>Statut illisible :</strong> ${escapeHtml(String(cause))}<br>
+        Diagnostic sur la machine : <code>liquidctl --match Kraken status</code>
+      </div>`;
+    if (typeof data.status_raw === 'string' && data.status_raw.trim()) {
+      el.innerHTML += `
+        <details class="kraken-raw">
+          <summary>Sortie brute de liquidctl</summary>
+          <pre>${escapeHtml(data.status_raw)}</pre>
+        </details>`;
+    }
+    return;
+  }
+  if (missing.length) {
+    const labels = missing.map((k) => KRAKEN_FIELD_LABELS[k] || k);
+    el.innerHTML += `<div class="kraken-status-note">ℹ Non remonté par ce modèle : ${escapeHtml(labels.join(', '))}</div>`;
+  }
+}
+
 /** Met à jour le statut Kraken affiché dans l'onglet. */
 async function refreshKraken() {
   const statusEl = document.getElementById('kraken-status');
@@ -831,6 +872,7 @@ async function refreshKraken() {
           <div class="kraken-stat-value">${st.fan_speed !== null && st.fan_speed !== undefined ? st.fan_speed + ' rpm' : '—'}</div>
         </div>
       </div>`;
+    appendKrakenStatusDiagnostic(statusEl, data);
     if (data.devices && data.devices.length) {
       statusEl.innerHTML += `<div class="kraken-devices">🔌 ${escapeHtml(data.devices.join(' · '))}</div>`;
     }
@@ -1004,33 +1046,62 @@ async function refreshDisplayStatus() {
   } catch (err) { /* silencieux */ }
 }
 
-/* ── Thèmes d'écran LCD : galerie de vignettes ──────────────────────
-   La liste des thèmes vient du BACKEND (GET /api/kraken/themes, dérivée de
-   ballistix/monitor.py) et chaque vignette est un PNG généré par le VRAI
-   moteur de rendu PIL (GET /api/kraken/themes/{key}/thumb.png). Le front ne
-   recopie donc plus ni les couleurs ni les stats d'exemple : ajouter un
-   thème dans monitor.py suffit. La simulation CSS ne sert plus que de
-   squelette (chargement) et de repli hors-ligne. La sélection n'est PAS un
-   thème d'interface : elle part dans la config monitoring (champ `theme`). */
+/* ── Écran LCD : deux sélecteurs (Palette × Disposition) ────────
+   Les deux catalogues viennent du BACKEND (GET /api/kraken/themes,
+   dérivé de ballistix/monitor.py). Le sélecteur DISPOSITION affiche des
+   vignettes PNG du VRAI moteur PIL (GET /api/kraken/layouts/{key}/thumb.png) ;
+   le sélecteur PALETTE affiche un nuancier (6 couleurs, aucune géométrie).
+   Le front ne recopie ni les couleurs ni les stats d'exemple : ajouter une
+   palette/disposition dans monitor.py suffit. La simulation CSS ne sert que
+   de squelette (chargement) et de repli hors-ligne. La sélection n'est PAS
+   un thème d'interface : elle part dans la config monitoring
+   (`palette` + `layout`). */
 
-/** Repli hors-ligne (API injoignable) — l'API reste la source unique. */
-const LCD_FALLBACK_THEMES = [
+/** Repli hors-ligne des PALETTES (API injoignable) — l'API reste la source. */
+const LCD_FALLBACK_PALETTES = [
   { key: 'data_center', label: 'Data Center', subtitle: 'Bleu Technique',
-    default: true, bg: '#050f19', text: '#c8e6ff', accent: '#00a0ff',
-    gaugeBg: '#0a1e32', gaugeStart: '#003c78', gaugeEnd: '#00b4ff' },
+    default: true, is_new: false,
+    colors: { bg: '#050f19', text: '#c8e6ff', accent: '#00a0ff',
+              gauge_bg: '#0a1e32', gauge_start: '#003c78', gauge_end: '#00b4ff' } },
   { key: 'overclock', label: 'Overclock', subtitle: 'Rouge Agressif',
-    bg: '#0f0505', text: '#f0f0f0', accent: '#ff0000',
-    gaugeBg: '#2d0a0a', gaugeStart: '#960000', gaugeEnd: '#ff2828' },
+    is_new: false,
+    colors: { bg: '#0f0505', text: '#f0f0f0', accent: '#ff0000',
+              gauge_bg: '#2d0a0a', gauge_start: '#960000', gauge_end: '#ff2828' } },
   { key: 'fluid_flow', label: 'Fluid Flow', subtitle: 'Bleu Pastel',
-    bg: '#19232d', text: '#e6f5ff', accent: '#78d2ff',
-    gaugeBg: '#32465a', gaugeStart: '#a0d2ff', gaugeEnd: '#c8e6ff' },
+    is_new: false,
+    colors: { bg: '#19232d', text: '#e6f5ff', accent: '#78d2ff',
+              gauge_bg: '#32465a', gauge_start: '#a0d2ff', gauge_end: '#c8e6ff' } },
+  { key: 'graphite', label: 'Graphite', subtitle: 'Mono sobre · nouvelle',
+    is_new: true,
+    colors: { bg: '#101113', text: '#e8eaee', accent: '#aab1bc',
+              gauge_bg: '#262a30', gauge_start: '#606874', gauge_end: '#c4cbd6' } },
+  { key: 'amber', label: 'Amber', subtitle: 'Fort contraste · nouvelle',
+    is_new: true,
+    colors: { bg: '#0a0804', text: '#fff1d6', accent: '#ffb020',
+              gauge_bg: '#302008', gauge_start: '#b06000', gauge_end: '#ffc840' } },
 ];
 
-/** Thèmes LCD courants (squelette, puis liste serveur après chargement). */
-let krakenThemes = LCD_FALLBACK_THEMES.slice();
+/** Repli hors-ligne des DISPOSITIONS. */
+const LCD_FALLBACK_LAYOUTS = [
+  { key: 'duo', label: 'Duo', subtitle: 'Deux colonnes — valeurs XL',
+    default: true, is_new: true },
+  { key: 'classic', label: 'Classique', subtitle: 'Liste verticale — actuelle',
+    is_new: false },
+  { key: 'rings', label: 'Anneaux', subtitle: 'Jauges circulaires',
+    is_new: true },
+];
 
-/** Thème LCD sélectionné — source unique lue par getKrakenMonitorConfig(). */
-let krakenLcdTheme = 'data_center';
+/** Palettes LCD courantes (repli, puis catalogue serveur). */
+let krakenPalettes = LCD_FALLBACK_PALETTES.slice();
+
+/** Dispositions LCD courantes (repli, puis catalogue serveur). */
+let krakenLayouts = LCD_FALLBACK_LAYOUTS.slice();
+
+/** Palette LCD sélectionnée — source unique de getKrakenMonitorConfig(). */
+let krakenLcdPalette = 'data_center';
+
+/** Disposition LCD sélectionnée. */
+let krakenLcdLayout = 'duo';
 
 /** Mode d'écran LCD courant (liquid — état mémoire serveur). */
 let krakenLcdMode = 'liquid';
@@ -1047,7 +1118,7 @@ function krakenSensorEl(key) {
   return document.getElementById(key === 'liquid' ? 'kraken-liquid-temp' : 'kraken-' + key);
 }
 
-/** Lignes décoratives du squelette CSS (vignette simulée, repli hors-ligne). */
+/** Lignes décoratives du squelette CSS (repli hors-ligne d'une vignette). */
 const LCD_THUMB_ROWS = [
   ['CPU', 42, '48°C'],
   ['GPU', 37, '51°C'],
@@ -1057,20 +1128,20 @@ const LCD_THUMB_ROWS = [
 ];
 
 /**
- * Squelette CSS d'une vignette (chargement / repli hors-ligne) — même
- * géométrie que le rendu PIL, mis à l'échelle par --s.
- * @param {object} t — thème (couleurs de repli)
+ * Squelette CSS d'une vignette (chargement / repli hors-ligne de la
+ * disposition) — mêmes couleurs que la palette courante.
+ * @param {object} pal — palette ({colors}) ou palette de repli
  * @param {number} size — taille finale en px
  * @returns {string} HTML de la vignette
  */
-function lcdThumbHTML(t, size) {
-  const bg = t.bg || '#0b0e14';
-  const text = t.text || '#c8d2e0';
-  const accent = t.accent || '#8a93a6';
-  const gaugeBg = t.gaugeBg || '#20242e';
-  const gaugeStart = t.gaugeStart || '#3a4150';
-  const gaugeEnd = t.gaugeEnd || '#8a93a6';
-  const label = t.label || t.key || '';
+function lcdThumbHTML(pal, size) {
+  const c = (pal && pal.colors) || pal || {};
+  const bg = c.bg || '#0b0e14';
+  const text = c.text || '#c8d2e0';
+  const accent = c.accent || '#8a93a6';
+  const gaugeBg = c.gauge_bg || '#20242e';
+  const gaugeStart = c.gauge_start || '#3a4150';
+  const gaugeEnd = c.gauge_end || '#8a93a6';
   const rows = LCD_THUMB_ROWS.map((r) =>
     '<div class="lcd-row">' +
       '<div class="lcd-rowtop"><span class="lcd-label">' + r[0] + '</span>' +
@@ -1080,7 +1151,7 @@ function lcdThumbHTML(t, size) {
   return '<div class="lcd" style="--lcd:' + size + 'px;--s:' + (size / 640) +
     ';--tbg:' + bg + ';--ttx:' + text + ';--tac:' + accent +
     ';--tgb:' + gaugeBg + ';--tgs:' + gaugeStart + ';--tge:' + gaugeEnd + '"' +
-    ' role="img" aria-label="Écran Kraken — thème ' + escapeHtml(label) + '">' +
+    ' role="img" aria-label="Aperçu d\'écran Kraken">' +
       '<div class="lcd-inner">' +
         '<div class="lcd-title">SYSTEM MONITOR</div>' +
         '<div class="lcd-time">14:32:07</div>' +
@@ -1089,132 +1160,200 @@ function lcdThumbHTML(t, size) {
       '</div></div>';
 }
 
-/** URL de la vignette PNG d'un thème (vrai moteur serveur). */
-function themeThumbURL(key) {
-  return '/api/kraken/themes/' + encodeURIComponent(key) + '/thumb.png';
+/** Palette du catalogue par sa clé (repli : la première). */
+function krakenPalette(key) {
+  return krakenPalettes.find((p) => p.key === key) || krakenPalettes[0] || null;
+}
+
+/** URL de la vignette PNG d'une disposition (vrai moteur serveur). */
+function layoutThumbURL(key) {
+  return '/api/kraken/layouts/' + encodeURIComponent(key) + '/thumb.png';
+}
+
+/** Nuancier 6 couleurs d'une palette (bg·texte·accent·jauges). */
+function paletteSwatchesHTML(pal) {
+  const c = (pal && pal.colors) || {};
+  const order = ['bg', 'text', 'accent', 'gauge_bg', 'gauge_start', 'gauge_end'];
+  const chips = order.map((k) =>
+    '<i style="background:' + escapeHtml(c[k] || '#000') + '"></i>').join('');
+  return '<span class="palette-swatches" aria-hidden="true">' + chips + '</span>';
 }
 
 /**
- * HTML d'une carte de thème. `useThumbs` = vignette PNG serveur ; sinon
- * squelette CSS (chargement / repli).
- * @param {object} t — {key, label, subtitle}
- * @param {boolean} useThumbs
+ * HTML d'une carte de palette (nuancier + libellé + badge actuelle/nouvelle).
+ * @param {object} p — {key, label, subtitle, is_new, colors}
  * @returns {string}
  */
-function themeCardHTML(t, useThumbs) {
-  const on = t.key === krakenLcdTheme;
-  const label = t.label || t.key;
-  const sub = t.subtitle || '';
-  const visual = useThumbs
-    ? '<img class="theme-thumb" data-theme-key="' + escapeHtml(t.key) + '"' +
-      ' src="' + themeThumbURL(t.key) + '"' +
-      ' alt="" loading="lazy" decoding="async" width="96" height="96">'
-    : lcdThumbHTML(t, 96);
-  const title = sub ? label + ' — ' + sub : label;
-  return '<button type="button" class="theme-card' + (on ? ' selected' : '') + '"' +
-    ' data-theme="' + escapeHtml(t.key) + '" role="radio" aria-checked="' + (on ? 'true' : 'false') + '"' +
-    ' title="' + escapeHtml(title) + '">' +
-    '<span class="theme-led" aria-hidden="true"></span>' +
+function paletteCardHTML(p) {
+  const on = p.key === krakenLcdPalette;
+  const label = p.label || p.key;
+  const sub = p.subtitle || '';
+  const badge = p.is_new ? 'nouvelle' : 'actuelle';
+  return '<button type="button" class="theme-card palette-card' + (on ? ' selected' : '') + '"' +
+    ' data-palette="' + escapeHtml(p.key) + '" role="radio" aria-checked="' + (on ? 'true' : 'false') + '"' +
+    ' title="' + escapeHtml(sub ? label + ' — ' + sub : label) + '">' +
     '<span class="theme-check" aria-hidden="true">✓</span>' +
-    '<span class="theme-badge">actif</span>' +
-    '<span class="theme-visual">' + visual + '</span>' +
-    '<span class="theme-info"><span class="theme-name">' + escapeHtml(label) + '</span></span>' +
+    '<span class="theme-visual">' + paletteSwatchesHTML(p) + '</span>' +
+    '<span class="theme-info"><span class="theme-name">' + escapeHtml(label) + '</span>' +
+    '<span class="theme-sub">' + escapeHtml(badge) + '</span></span>' +
   '</button>';
 }
 
-/** Peint la galerie (une fois par liste) et branche les clics. */
-function paintKrakenThemeGallery(useThumbs) {
-  const host = document.getElementById('theme-gallery');
+/**
+ * HTML d'une carte de disposition (mini-écran PNG + libellé + sous-titre).
+ * @param {object} l — {key, label, subtitle}
+ * @param {boolean} useThumbs
+ * @returns {string}
+ */
+function layoutCardHTML(l, useThumbs) {
+  const on = l.key === krakenLcdLayout;
+  const label = l.label || l.key;
+  const sub = l.subtitle || '';
+  const visual = useThumbs
+    ? '<img class="layout-thumb" data-layout-key="' + escapeHtml(l.key) + '"' +
+      ' src="' + layoutThumbURL(l.key) + '"' +
+      ' alt="" loading="lazy" decoding="async" width="140" height="140">'
+    : lcdThumbHTML(krakenPalette(krakenLcdPalette), 140);
+  return '<button type="button" class="theme-card layout-card' + (on ? ' selected' : '') + '"' +
+    ' data-layout="' + escapeHtml(l.key) + '" role="radio" aria-checked="' + (on ? 'true' : 'false') + '"' +
+    ' title="' + escapeHtml(sub ? label + ' — ' + sub : label) + '">' +
+    '<span class="theme-check" aria-hidden="true">✓</span>' +
+    '<span class="theme-visual">' + visual + '</span>' +
+    '<span class="theme-info"><span class="theme-name">' + escapeHtml(label) + '</span>' +
+    '<span class="theme-sub">' + escapeHtml(sub) + '</span></span>' +
+  '</button>';
+}
+
+/** Peint le sélecteur de palettes et branche les clics. */
+function paintKrakenPaletteGallery() {
+  const host = document.getElementById('palette-gallery');
   if (!host) return;
-  host.innerHTML = krakenThemes.map((t) => themeCardHTML(t, useThumbs)).join('');
-  host.querySelectorAll('.theme-card').forEach((card) => {
+  host.innerHTML = krakenPalettes.map(paletteCardHTML).join('');
+  host.querySelectorAll('.palette-card').forEach((card) => {
     card.addEventListener('click', () => {
-      selectKrakenLcdTheme(card.dataset.theme);
+      selectKrakenPalette(card.dataset.palette);
       // Temps réel : applique au thread serveur + rafraîchit l'aperçu 320 px.
       scheduleKrakenApply();
       scheduleKrakenPreview();
     });
   });
+  updateThemeCount();
+}
+
+/** Peint le sélecteur de dispositions (vignettes PNG + repli CSS). */
+function paintKrakenLayoutGallery(useThumbs) {
+  const host = document.getElementById('layout-gallery');
+  if (!host) return;
+  host.innerHTML = krakenLayouts.map((l) => layoutCardHTML(l, useThumbs)).join('');
+  host.querySelectorAll('.layout-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      selectKrakenLayout(card.dataset.layout);
+      scheduleKrakenApply();
+      scheduleKrakenPreview();
+    });
+  });
   // Si une vignette PNG échoue (serveur dégradé), replier sur le squelette CSS.
-  host.querySelectorAll('img.theme-thumb').forEach((img) => {
+  host.querySelectorAll('img.layout-thumb').forEach((img) => {
     img.addEventListener('error', () => {
-      const t = krakenThemes.find((x) => x.key === img.dataset.themeKey) ||
-        { key: img.dataset.themeKey, label: img.dataset.themeKey };
       const holder = document.createElement('span');
-      holder.innerHTML = lcdThumbHTML(t, 96);
+      holder.innerHTML = lcdThumbHTML(krakenPalette(krakenLcdPalette), 140);
       if (holder.firstChild) img.replaceWith(holder.firstChild);
     });
   });
   updateThemeCount();
 }
 
-/** Construit la galerie : squelette CSS immédiat, puis vraies vignettes. */
-function renderKrakenThemeGallery() {
-  const host = document.getElementById('theme-gallery');
-  if (!host) return;
-  krakenThemes = LCD_FALLBACK_THEMES.slice();
-  paintKrakenThemeGallery(false);      // squelette de chargement
-  refreshKrakenThemes();               // asynchrone, remplace par les PNG
+/** Construit les deux sélecteurs : repli immédiat, puis catalogues serveur. */
+function renderKrakenCatalog() {
+  krakenPalettes = LCD_FALLBACK_PALETTES.slice();
+  krakenLayouts = LCD_FALLBACK_LAYOUTS.slice();
+  paintKrakenPaletteGallery();
+  paintKrakenLayoutGallery(false);     // squelette de chargement
+  refreshKrakenCatalog();              // asynchrone, remplace par les PNG
 }
 
-/** Charge la liste des thèmes depuis le backend et passe aux vignettes PNG. */
-async function refreshKrakenThemes() {
-  const host = document.getElementById('theme-gallery');
-  if (!host) return;
+/** Charge palettes + dispositions depuis le backend (GET /kraken/themes). */
+async function refreshKrakenCatalog() {
+  if (!document.getElementById('palette-gallery')) return;
   try {
     const data = await apiFetch('/kraken/themes');
-    const themes = data && data.ok && Array.isArray(data.themes) ? data.themes : null;
-    if (!themes || themes.length === 0) return;
-    krakenThemes = themes;
-    // Le thème sélectionné peut ne pas être dans la liste → repli sur le défaut.
-    if (!krakenThemes.some((t) => t.key === krakenLcdTheme)) {
-      krakenLcdTheme = (krakenThemes.find((t) => t.default) || krakenThemes[0]).key;
-      const keyEl = document.getElementById('theme-key');
-      if (keyEl) keyEl.textContent = krakenLcdTheme;
+    if (!data || !data.ok) return;
+    if (Array.isArray(data.palettes) && data.palettes.length) {
+      krakenPalettes = data.palettes;
+    } else if (Array.isArray(data.themes) && data.themes.length) {
+      krakenPalettes = data.themes;   // repli : alias historique
     }
-    paintKrakenThemeGallery(true);
+    if (Array.isArray(data.layouts) && data.layouts.length) {
+      krakenLayouts = data.layouts;
+    }
+    // Une clé sélectionnée peut ne pas être dans la liste → repli sur le défaut.
+    if (!krakenPalettes.some((p) => p.key === krakenLcdPalette)) {
+      krakenLcdPalette = (krakenPalettes.find((p) => p.default) || krakenPalettes[0]).key;
+    }
+    if (!krakenLayouts.some((l) => l.key === krakenLcdLayout)) {
+      krakenLcdLayout = (krakenLayouts.find((l) => l.default) || krakenLayouts[0]).key;
+    }
+    paintKrakenPaletteGallery();
+    paintKrakenLayoutGallery(true);
   } catch (err) {
-    // Repli hors-ligne : le squelette CSS reste affiché (aucune erreur UI).
+    // Repli hors-ligne : les squelettes CSS restent affichés.
   }
 }
 
-/** Compteur de thèmes affiché dans l'en-tête du panneau monitoring. */
+/** Compteur « N palettes · M dispositions » de l'en-tête monitoring. */
 function updateThemeCount() {
   const el = document.getElementById('theme-count');
   if (el) {
-    el.textContent = krakenThemes.length +
-      (krakenThemes.length > 1 ? ' thèmes' : ' thème');
+    el.textContent = krakenPalettes.length + ' palette' +
+      (krakenPalettes.length > 1 ? 's' : '') + ' · ' +
+      krakenLayouts.length + ' disposition' + (krakenLayouts.length > 1 ? 's' : '');
   }
 }
 
 /**
- * Sélectionne un thème LCD (état visuel + clé envoyée au daemon).
- * @param {string} key — clé du thème (liste serveur)
+ * Sélectionne une palette LCD (état visuel + clé envoyée au daemon).
+ * @param {string} key — clé de palette (catalogue serveur)
  */
-function selectKrakenLcdTheme(key) {
+function selectKrakenPalette(key) {
   if (!key) return;
-  krakenLcdTheme = key;
-  document.querySelectorAll('#theme-gallery .theme-card').forEach((c) => {
-    const on = c.dataset.theme === key;
+  krakenLcdPalette = key;
+  document.querySelectorAll('#palette-gallery .palette-card').forEach((c) => {
+    const on = c.dataset.palette === key;
     c.classList.toggle('selected', on);
     c.setAttribute('aria-checked', on ? 'true' : 'false');
   });
-  const keyEl = document.getElementById('theme-key');
+  const keyEl = document.getElementById('palette-key');
   if (keyEl) keyEl.textContent = key;
   scheduleDirtyUpdate();
 }
 
 /**
- * Récupère la configuration actuelle du monitoring (thème et capteurs).
- * @returns {{theme: string, options: string[]}}
+ * Sélectionne une disposition LCD.
+ * @param {string} key — clé de disposition (catalogue serveur)
+ */
+function selectKrakenLayout(key) {
+  if (!key) return;
+  krakenLcdLayout = key;
+  document.querySelectorAll('#layout-gallery .layout-card').forEach((c) => {
+    const on = c.dataset.layout === key;
+    c.classList.toggle('selected', on);
+    c.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  const keyEl = document.getElementById('layout-key');
+  if (keyEl) keyEl.textContent = key;
+  scheduleDirtyUpdate();
+}
+
+/**
+ * Récupère la configuration actuelle du monitoring.
+ * @returns {{palette: string, layout: string, options: string[]}}
  */
 function getKrakenMonitorConfig() {
-  const theme = krakenLcdTheme;
   const options = KRAKEN_SENSOR_KEYS.filter((key) => {
     const el = krakenSensorEl(key);
     return !!(el && el.checked);
   });
-  return { theme, options };
+  return { palette: krakenLcdPalette, layout: krakenLcdLayout, options };
 }
 
 /** Libellé humain d'une cadence (jamais de FPS — contrainte liquidctl). */
@@ -1254,7 +1393,8 @@ function scheduleKrakenApply() {
         method: 'POST',
         body: {
           interval: krakenInterval(),
-          theme: config.theme,
+          palette: config.palette,
+          layout: config.layout,
           options: config.options,
         },
       });
@@ -1272,13 +1412,15 @@ async function krakenStartMonitor() {
       method: 'POST',
       body: {
         interval: krakenInterval(),
-        theme: config.theme,
+        palette: config.palette,
+        layout: config.layout,
         options: config.options
       },
     });
     if (data.ok) {
       krakenDisplayMode = 'monitor';
-      toast('🖥 Monitoring démarré (' + config.theme + ', ' + formatInterval(krakenInterval()) + ')', 'success');
+      toast('🖥 Monitoring démarré (' + config.palette + '/' + config.layout +
+        ', ' + formatInterval(krakenInterval()) + ')', 'success');
       refreshDisplayStatus();
       scheduleDirtyUpdate();
     } else {
@@ -1331,7 +1473,8 @@ async function krakenPreview(silent = false) {
     const data = await apiFetch('/kraken/monitor/preview', {
       method: 'POST',
       body: {
-        theme: config.theme,
+        palette: config.palette,
+        layout: config.layout,
         options: config.options
       },
     });
@@ -1527,7 +1670,9 @@ function normalizeReference(ref) {
       },
       display: {
         mode: display.mode !== undefined ? display.mode : null,
-        theme: display.theme || 'data_center',
+        theme: display.theme || display.palette || 'data_center',
+        palette: display.palette || display.theme || 'data_center',
+        layout: display.layout || 'classic',
         options: Array.isArray(display.options)
           ? display.options.map(String)
           : ['cpu', 'gpu', 'ram', 'vram', 'disks'],
@@ -1635,8 +1780,13 @@ function computeDirtyItems() {
 
   // 6. Kraken — affichage (monitoring / gallery)
   const disp = ref.kraken.display;
-  if (disp.theme !== krakenLcdTheme) {
-    items.push(`Thème LCD : ${disp.theme} → ${krakenLcdTheme}`);
+  const refPalette = disp.palette || disp.theme;
+  const refLayout = disp.layout || 'classic';
+  if (refPalette !== krakenLcdPalette) {
+    items.push(`Palette LCD : ${refPalette} → ${krakenLcdPalette}`);
+  }
+  if (refLayout !== krakenLcdLayout) {
+    items.push(`Disposition LCD : ${refLayout} → ${krakenLcdLayout}`);
   }
   const currentOptions = getKrakenMonitorConfig().options.join(',');
   if (currentOptions !== disp.options.join(',')) items.push('Capteurs LCD');
@@ -1758,7 +1908,10 @@ async function hydrateKrakenControls() {
     const st = await apiFetch('/kraken/display/status');
     if (st) {
       krakenDisplayMode = st.mode !== undefined ? st.mode : null;
-      if (st.theme) selectKrakenLcdTheme(st.theme);
+      if (st.palette || st.theme) {
+        selectKrakenPalette(st.palette || st.theme);
+      }
+      if (st.layout) selectKrakenLayout(st.layout);
       if (Array.isArray(st.options)) {
         KRAKEN_SENSOR_KEYS.forEach((key) => {
           const el = krakenSensorEl(key);
@@ -2223,9 +2376,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const krakenBtnInit = document.getElementById('kraken-btn-init');
   if (krakenBtnInit) krakenBtnInit.addEventListener('click', krakenInitialize);
 
-  // Galerie de thèmes LCD (remplace l'ancien <select>) — rendue avant le
-  // premier démarrage monitoring pour que krakenLcdTheme reflète l'UI.
-  renderKrakenThemeGallery();
+  // Sélecteurs Palette × Disposition (remplacent l'ancienne galerie de
+  // thèmes) — rendus avant le premier démarrage monitoring pour que l'UI
+  // reflète la sélection courante.
+  renderKrakenCatalog();
 
   // Vérification silencieuse du Kraken au chargement (ne bloque pas l'init)
   refreshKraken();

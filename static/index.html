@@ -262,17 +262,23 @@
           <div class="card-head">
             <span class="card-title">📊 Monitoring — configuration</span>
             <span class="card-head-tools">
-              <span class="badge" id="theme-count">3 thèmes</span>
-              <span class="badge">Thème : <b id="theme-key">data_center</b></span>
+              <span class="badge" id="theme-count">5 palettes · 3 dispositions</span>
+              <span class="badge">Palette : <b id="palette-key">data_center</b></span>
+              <span class="badge">Disposition : <b id="layout-key">duo</b></span>
               <button class="btn btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
             </span>
           </div>
 
-          <!-- Galerie des thèmes d'écran LCD : liste servie par
-               GET /api/kraken/themes (dérivée de ballistix/monitor.py) et
-               vignettes PNG générées par le VRAI moteur de rendu PIL ;
-               squelette CSS au chargement / repli hors-ligne. -->
-          <div class="theme-gallery" id="theme-gallery" role="radiogroup" aria-label="Thème visuel de l'écran LCD"></div>
+          <!-- Deux sélecteurs indépendants :
+               - PALETTE : nuancier 6 couleurs (GET /api/kraken/themes → palettes) ;
+               - DISPOSITION : mini-écran PNG du VRAI moteur PIL
+                 (GET /api/kraken/layouts/{key}/thumb.png).
+               Squelette CSS au chargement / repli hors-ligne. -->
+          <div class="hint" style="margin-top:10px;">Palette</div>
+          <div class="theme-gallery palette-gallery" id="palette-gallery" role="radiogroup" aria-label="Palette de l'écran LCD"></div>
+
+          <div class="hint" style="margin-top:12px;">Disposition</div>
+          <div class="layout-gallery" id="layout-gallery" role="radiogroup" aria-label="Disposition de l'écran LCD"></div>
 
           <div class="hint" style="margin-top:12px;">Capteurs à afficher</div>
           <div class="sensors">

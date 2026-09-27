@@ -3,8 +3,22 @@
 ballistix/monitor.py — Monitoring système pour l'écran du Kraken.
 
 Collecte les stats système (CPU, GPU AMD, RAM, VRAM, disques) et
-génère une image 640×640 avec Pillow (chiffres + jauges) pour
-l'écran LCD du Kraken Z53.
+génère une image 640×640 avec Pillow pour l'écran LCD du Kraken Z53.
+
+Modèle de rendu : **palette × disposition × capteurs**.
+
+    - **Palette** (``PALETTES``, 5 entrées) : uniquement des couleurs ;
+    - **Disposition** (``LAYOUTS``, 3 entrées) : uniquement de la géométrie,
+      rendue par une fonction dédiée (``_render_classic``, ``_render_duo``,
+      ``_render_rings``) ;
+    - **Capteurs** (``options``, 6 entrées) : cases à cocher CPU/GPU/RAM/
+      VRAM/disques/liquide.
+
+Un seul point d'entrée : :func:`render_monitoring_image`.
+
+Rétrocompatibilité : l'ancien paramètre ``theme_name`` (3ᵉ positionnel) est
+toujours accepté et interprété comme ``palette=theme_name, layout="classic"``
+— les appelants historiques ne changent donc pas de rendu.
 
 Dépendances optionnelles :
     - Pillow (rendu d'image) — requise pour le mode monitoring
@@ -14,6 +28,7 @@ Si ces libs ne sont pas installées, les fonctions retournent
 proprement un flag `ok: False` sans crasher le serveur.
 """
 
+import math
 import os
 import re
 import time
@@ -44,11 +59,19 @@ SCREEN_SIZE = (640, 640)          # Écran du Kraken Z53
 CENTER = (320, 320)
 SAFE_RADIUS = 300                # Zone où le texte est visible
 
-# ── Thèmes ──────────────────────────────────────────────────────
+# ── Palettes ────────────────────────────────────────────────────────
+#
+# Une palette ne contient QUE des couleurs (6 valeurs RGB) : plus aucune
+# géométrie. Les 3 palettes historiques (data_center, overclock,
+# fluid_flow) reprennent EXACTEMENT les valeurs de l'ancien ``THEMES`` — un
+# rendu existant est donc inchangé. Graphite (mono sobre) et Amber (fort
+# contraste) sont les deux nouvelles palettes validées.
 
-class Theme:
+class Palette:
+    """Jeu de 6 couleurs d'écran + métadonnées de galerie."""
+
     def __init__(self, bg, text, accent, gauge_bg, gauge_start, gauge_end,
-                 label=None, subtitle=None):
+                 label=None, subtitle=None, is_new=False):
         self.bg = bg
         self.text = text
         self.accent = accent
@@ -58,19 +81,25 @@ class Theme:
         # Métadonnées exposées par l'API (galerie web) : libellé + sous-titre.
         self.label = label
         self.subtitle = subtitle
+        self.is_new = is_new
 
-THEMES = {
-    "overclock": Theme(
-        bg=(15, 5, 5),
-        text=(240, 240, 240),
-        accent=(255, 0, 0),
-        gauge_bg=(45, 10, 10),
-        gauge_start=(150, 0, 0),
-        gauge_end=(255, 40, 40),
-        label="Overclock",
-        subtitle="Rouge Agressif",
-    ),
-    "data_center": Theme(
+    def colors(self) -> dict:
+        """Palette sous forme hexadécimale (pour l'API / le nuancier web)."""
+        return {
+            "bg": _hex(self.bg),
+            "text": _hex(self.text),
+            "accent": _hex(self.accent),
+            "gauge_bg": _hex(self.gauge_bg),
+            "gauge_start": _hex(self.gauge_start),
+            "gauge_end": _hex(self.gauge_end),
+        }
+
+
+# Nom historique conservé (le module exposait ``Theme``).
+Theme = Palette
+
+PALETTES = {
+    "data_center": Palette(
         bg=(5, 15, 25),
         text=(200, 230, 255),
         accent=(0, 160, 255),
@@ -80,7 +109,17 @@ THEMES = {
         label="Data Center",
         subtitle="Bleu Technique",
     ),
-    "fluid_flow": Theme(
+    "overclock": Palette(
+        bg=(15, 5, 5),
+        text=(240, 240, 240),
+        accent=(255, 0, 0),
+        gauge_bg=(45, 10, 10),
+        gauge_start=(150, 0, 0),
+        gauge_end=(255, 40, 40),
+        label="Overclock",
+        subtitle="Rouge Agressif",
+    ),
+    "fluid_flow": Palette(
         bg=(25, 35, 45),
         text=(230, 245, 255),
         accent=(120, 210, 255),
@@ -90,32 +129,154 @@ THEMES = {
         label="Fluid Flow",
         subtitle="Bleu Pastel",
     ),
+    "graphite": Palette(
+        bg=(16, 17, 19),
+        text=(232, 234, 238),
+        accent=(170, 177, 188),
+        gauge_bg=(38, 42, 48),
+        gauge_start=(96, 104, 116),
+        gauge_end=(196, 203, 214),
+        label="Graphite",
+        subtitle="Mono sobre · nouvelle",
+        is_new=True,
+    ),
+    "amber": Palette(
+        bg=(10, 8, 4),
+        text=(255, 241, 214),
+        accent=(255, 176, 32),
+        gauge_bg=(48, 32, 8),
+        gauge_start=(176, 96, 0),
+        gauge_end=(255, 200, 64),
+        label="Amber",
+        subtitle="Fort contraste · nouvelle",
+        is_new=True,
+    ),
 }
 
-# Thème par défaut (celui du mode monitoring).
-DEFAULT_THEME = "data_center"
+# Palette par défaut (celle du mode monitoring).
+DEFAULT_PALETTE = "data_center"
+
+# Alias de rétrocompatibilité (ancien vocabulaire « thème »).
+THEMES = PALETTES
+DEFAULT_THEME = DEFAULT_PALETTE
+
+
+# ── Dispositions ────────────────────────────────────────────────────
+#
+# Une disposition ne contient QUE de la géométrie (positions + tailles de
+# police) : elle est rendue par la fonction ``_render_<key>``.
+
+class Layout:
+    def __init__(self, label, subtitle=None, is_new=False):
+        self.label = label
+        self.subtitle = subtitle
+        self.is_new = is_new
+
+
+LAYOUTS = {
+    "classic": Layout("Classique", "Liste verticale — actuelle"),
+    "duo": Layout("Duo", "Deux colonnes — valeurs XL", is_new=True),
+    "rings": Layout("Anneaux", "Jauges circulaires", is_new=True),
+}
+
+# Disposition par défaut : le grand format deux colonnes (décision utilisateur).
+DEFAULT_LAYOUT = "duo"
+
+# Ordre d'affichage des métriques (lignes classiques / cellules / anneaux).
+METRIC_ORDER = ["cpu", "gpu", "ram", "vram", "liquid"]
+# Priorité des héros du grand format : les températures d'abord, le liquide
+# promu automatiquement si CPU ou GPU est désactivé.
+HERO_ORDER = ["cpu", "gpu", "liquid", "ram", "vram"]
+# Nombre maximal d'anneaux et emplacements adaptatifs (composition symétrique).
+MAX_RINGS = 4
+RING_SLOTS = {
+    1: [(320, 320)],
+    2: [(183, 320), (457, 320)],
+    3: [(183, 272), (457, 272), (320, 438)],
+    4: [(183, 268), (457, 268), (183, 432), (457, 432)],
+}
+
+
+def hero_metrics(options) -> list:
+    """Métriques des 2 héros du grand format (CPU > GPU > LIQUID > RAM > VRAM)."""
+    return [m for m in HERO_ORDER if m in options][:2]
+
+
+def secondary_metrics(options) -> list:
+    """Métriques de la grille secondaire du grand format (ordre classique)."""
+    heroes = set(hero_metrics(options))
+    return [m for m in METRIC_ORDER if m in options and m not in heroes]
+
+
+def ring_metrics(options) -> list:
+    """4 premières métriques actives (ordre CPU, GPU, RAM, VRAM, LIQUID)."""
+    return [m for m in METRIC_ORDER if m in options][:MAX_RINGS]
+
+
+def ring_overflow_metrics(options) -> list:
+    """Métriques actives au-delà des 4 anneaux (pied de cercle)."""
+    return [m for m in METRIC_ORDER if m in options][MAX_RINGS:]
+
+
+def ring_slot_set(count: int) -> list:
+    """Emplacements des anneaux (1 centré, 2 en ligne, 3 en triangle, 4 en grille)."""
+    return list(RING_SLOTS.get(count, RING_SLOTS[MAX_RINGS]))
 
 
 def list_themes() -> list:
-    """Liste ordonnée des thèmes d'écran pour l'API (défaut en tête).
+    """Liste ordonnée des « thèmes » (alias historique des palettes).
 
-    Chaque entrée : ``{key, label, subtitle, default}``. C'est la source
-    unique : ajouter un thème à THEMES suffit pour qu'il apparaisse dans
-    la galerie web (vignette comprise, sans toucher au front).
+    Chaque entrée : ``{key, label, subtitle, default}``. Conservé pour la
+    rétrocompatibilité d'API ; les nouveaux appelants utiliseront
+    :func:`list_palettes` (couleurs incluses) et :func:`list_layouts`.
     """
-    def entry(key, theme):
+    def entry(key, pal):
         return {
             "key": key,
-            "label": theme.label or key.replace("_", " ").title(),
-            "subtitle": theme.subtitle or "",
-            "default": key == DEFAULT_THEME,
+            "label": pal.label or key.replace("_", " ").title(),
+            "subtitle": pal.subtitle or "",
+            "default": key == DEFAULT_PALETTE,
         }
 
     ordered = []
-    if DEFAULT_THEME in THEMES:
-        ordered.append((DEFAULT_THEME, THEMES[DEFAULT_THEME]))
-    ordered.extend((k, t) for k, t in THEMES.items() if k != DEFAULT_THEME)
-    return [entry(k, t) for k, t in ordered]
+    if DEFAULT_PALETTE in PALETTES:
+        ordered.append((DEFAULT_PALETTE, PALETTES[DEFAULT_PALETTE]))
+    ordered.extend((k, p) for k, p in PALETTES.items() if k != DEFAULT_PALETTE)
+    return [entry(k, p) for k, p in ordered]
+
+
+def list_palettes() -> list:
+    """Catalogue ordonné des palettes (défaut en tête, couleurs incluses)."""
+    entries = []
+    for item in list_themes():
+        pal = PALETTES[item["key"]]
+        entries.append({
+            "key": item["key"],
+            "label": item["label"],
+            "subtitle": item["subtitle"],
+            "default": item["default"],
+            "is_new": bool(getattr(pal, "is_new", False)),
+            "colors": pal.colors(),
+        })
+    return entries
+
+
+def list_layouts() -> list:
+    """Catalogue ordonné des dispositions (défaut en tête)."""
+    def entry(key, layout):
+        return {
+            "key": key,
+            "label": layout.label or key.replace("_", " ").title(),
+            "subtitle": layout.subtitle or "",
+            "default": key == DEFAULT_LAYOUT,
+        }
+
+    ordered = []
+    if DEFAULT_LAYOUT in LAYOUTS:
+        ordered.append((DEFAULT_LAYOUT, LAYOUTS[DEFAULT_LAYOUT]))
+    ordered.extend((k, l) for k, l in LAYOUTS.items() if k != DEFAULT_LAYOUT)
+    return [entry(k, l) for k, l in ordered]
+
 
 # ── Collecte des stats ──────────────────────────────────────────────
 
@@ -264,57 +425,62 @@ def collect_system_stats() -> dict:
     return stats
 
 
-# ── Rendu d'image ───────────────────────────────────────────────────
+# ── Polices ─────────────────────────────────────────────────────────
+
+_FONT_CACHE = {}
+
 
 def _load_font(size: int):
-    """Charge une police TTF si dispo, sinon la police par défaut."""
+    """Charge une police TTF si dispo, sinon la police par défaut.
+
+    Le résultat est mis en cache par taille : un rendu utilise plusieurs
+    tailles et le monitoring en génère plusieurs fois par minute.
+    """
     if not ImageFont:
         return None
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
     ]
+    font = None
     for path in candidates:
         if os.path.isfile(path):
             try:
-                return ImageFont.truetype(path, size)
+                font = ImageFont.truetype(path, size)
+                break
             except Exception:
                 continue
-    try:
-        return ImageFont.load_default(size=size)
-    except Exception:
-        return ImageFont.load_default()
+    if font is None:
+        try:
+            font = ImageFont.load_default(size=size)
+        except Exception:
+            font = ImageFont.load_default()
+    _FONT_CACHE[size] = font
+    return font
+
+
+# ── Helpers couleur / formatage ─────────────────────────────────────
+
+def _hex(rgb) -> str:
+    """Couleur RGB → ``#rrggbb``."""
+    return "#%02x%02x%02x" % tuple(int(c) for c in rgb)
 
 
 def _interpolate_color(c1, c2, factor):
-    """Interpolation linéaire entre deux couleurs RGB."""
+    """Interpolation linéaire entre deux couleurs RGB (bornée 0..1)."""
+    factor = min(1.0, max(0.0, factor))
     return tuple(int(c1[i] + (c2[i] - c1[i]) * factor) for i in range(3))
 
 
 def _get_row_width(y):
-    """Calcule la largeur disponible à l'ordonnée y pour rester dans le cercle."""
+    """Largeur disponible à l'ordonnée y pour rester dans le cercle sûr."""
     dy = abs(y - CENTER[1])
     if dy >= SAFE_RADIUS:
         return 0
-    return 2 * (SAFE_RADIUS**2 - dy**2)**0.5
-
-
-def _draw_gauge(draw, x, y, width, height, percent, theme: Theme) -> None:
-    """Dessine une jauge horizontale arrondie avec les couleurs du thème."""
-    if percent is None:
-        return
-    # Fond de la jauge
-    draw.rounded_rectangle(
-        [x, y, x + width, y + height], radius=height // 2, fill=theme.gauge_bg
-    )
-    # Remplissage avec interpolation couleur
-    fill_w = int(width * min(100.0, max(0.0, percent)) / 100.0)
-    if fill_w > 0:
-        color = _interpolate_color(theme.gauge_start, theme.gauge_end, percent / 100.0)
-        draw.rounded_rectangle(
-            [x, y, x + fill_w, y + height], radius=height // 2, fill=color
-        )
+    return 2 * (SAFE_RADIUS**2 - dy**2) ** 0.5
 
 
 def _fmt_bytes(n) -> str:
@@ -328,114 +494,419 @@ def _fmt_bytes(n) -> str:
     return "—"
 
 
-def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "data_center", options: list = None, now=None) -> bool:
-    """Génère l'image 640×640 de monitoring adaptée au cercle.
+def _fmt_pair(d) -> str:
+    """« 9.3 GB / 16.0 GB » à partir d'un dict {used, total}."""
+    d = d or {}
+    return f"{_fmt_bytes(d.get('used'))} / {_fmt_bytes(d.get('total'))}"
 
-    Args:
-        stats: Dictionnaire des stats système.
-        output_path: Chemin de sauvegarde.
-        theme_name: Clé dans THEMES.
-        options: Liste des stats à afficher (ex: ['cpu', 'gpu', 'liquid']).
-        now: Heure à afficher (datetime/chaîne). None = heure courante ;
-            une valeur figée rend le PNG reproductible (vignettes en cache).
-    """
-    if not PIL_AVAILABLE:
-        return False
 
-    theme = THEMES.get(theme_name, THEMES["data_center"])
-    if options is None:
-        options = ["cpu", "gpu", "ram", "vram", "disks", "liquid"]
+def _fmt_temp(v) -> str:
+    return "—" if v is None else f"{v:.0f}°C"
 
-    img = Image.new("RGB", SCREEN_SIZE, theme.bg)
-    draw = ImageDraw.Draw(img)
-    
-    font_title = _load_font(32)
-    font_label = _load_font(24)
-    font_value = _load_font(24)
-    font_small = _load_font(20)
 
-    # ── Titre et Heure ──
-    y = 110
-    title_text = "SYSTEM MONITOR"
-    tw = draw.textlength(title_text, font=font_title)
-    draw.text((CENTER[0] - tw // 2, y), title_text, fill=theme.accent, font=font_title)
-    
+def _fmt_temp_dec(v) -> str:
+    return "—" if v is None else f"{v:.1f}°C"
+
+
+def _time_text(now=None) -> str:
+    """Heure ``HH:MM:SS`` à afficher (figée si ``now`` fourni)."""
     if now is None:
-        now_text = time.strftime("%H:%M:%S")
-    elif hasattr(now, "strftime"):
-        now_text = now.strftime("%H:%M:%S")
+        return time.strftime("%H:%M:%S")
+    if hasattr(now, "strftime"):
+        return now.strftime("%H:%M:%S")
+    return str(now)
+
+
+def _pct_of(stats: dict, metric: str):
+    """Pourcentage associé à une métrique, None si non applicable."""
+    if metric == "cpu":
+        return stats.get("cpu_percent")
+    if metric in ("ram", "vram"):
+        return (stats.get(metric) or {}).get("percent")
+    return None
+
+
+def _gauge_percent(stats: dict, metric: str):
+    """Remplissage de jauge/anneau selon la métrique.
+
+    - CPU / GPU  : température mappée 20–90 °C (la charge est affichée à
+      part pour le CPU) ;
+    - LIQUID     : température mappée 20–50 °C (plage utile d'un AIO) ;
+    - RAM / VRAM : pourcentage utilisé direct.
+    """
+    if metric in ("cpu", "gpu"):
+        t = stats.get(f"{metric}_temp")
+        return None if t is None else (t - 20.0) / 70.0 * 100.0
+    if metric == "liquid":
+        t = stats.get("liquid_temp")
+        return None if t is None else (t - 20.0) / 30.0 * 100.0
+    return _pct_of(stats, metric)
+
+
+def _metric_label(metric: str) -> str:
+    return {"cpu": "CPU", "gpu": "GPU", "ram": "RAM", "vram": "VRAM",
+            "liquid": "LIQUID"}.get(metric, metric.upper())
+
+
+def _hero_text(stats: dict, metric: str):
+    """(valeur, unité) d'une métrique pour une grande valeur (héros/anneau)."""
+    if metric in ("cpu", "gpu"):
+        return _fmt_temp(stats.get(f"{metric}_temp")).removesuffix("°C"), "°C"
+    if metric == "liquid":
+        return _fmt_temp_dec(stats.get("liquid_temp")).removesuffix("°C"), "°C"
+    p = _pct_of(stats, metric)
+    return ("—" if p is None else f"{p:.0f}"), "%"
+
+
+# ── Helpers de dessin ───────────────────────────────────────────────
+
+def _text_len(draw, s, font):
+    return draw.textlength(s, font=font)
+
+
+def _draw_center(draw, cx, y, s, font, fill):
+    w = _text_len(draw, s, font)
+    draw.text((cx - w / 2, y), s, font=font, fill=fill)
+
+
+def _draw_right(draw, x_right, y, s, font, fill):
+    w = _text_len(draw, s, font)
+    draw.text((x_right - w, y), s, font=font, fill=fill)
+
+
+def _draw_combo(draw, cx, y, main, unit, font_main, font_unit, fill, gap=2):
+    """Valeur + unité alignées sur la ligne de base (ancrage 'la')."""
+    wm = _text_len(draw, main, font_main)
+    wu = _text_len(draw, unit, font_unit) if unit else 0
+    total = wm + (gap + wu if unit else 0)
+    x = cx - total / 2
+    if font_unit:
+        asc_m = font_main.getmetrics()[0]
+        asc_u = font_unit.getmetrics()[0]
     else:
-        now_text = str(now)
-    ntw = draw.textlength(now_text, font=font_small)
-    draw.text((CENTER[0] - ntw // 2, y + 35), now_text, fill=theme.text, font=font_small)
-    
+        asc_m = asc_u = 0
+    draw.text((x, y), main, font=font_main, fill=fill)
+    if unit:
+        draw.text((x + wm + gap, y + asc_m - asc_u), unit, font=font_unit, fill=fill)
+
+
+def _draw_gauge(draw, x, y, width, height, percent, pal: Palette) -> None:
+    """Jauge horizontale arrondie (fond toujours dessiné, remplissage si %)."""
+    draw.rounded_rectangle(
+        [x, y, x + width, y + height], radius=height // 2, fill=pal.gauge_bg
+    )
+    if percent is None:
+        return
+    fill_w = width * min(100.0, max(0.0, percent)) / 100.0
+    if fill_w > 0:
+        color = _interpolate_color(pal.gauge_start, pal.gauge_end, percent / 100.0)
+        draw.rounded_rectangle(
+            [x, y, x + fill_w, y + height], radius=height // 2, fill=color
+        )
+
+
+def _draw_ring(draw, cx, cy, radius, stroke, percent, pal: Palette) -> None:
+    """Anneau de progression (départ 12 h, sens horaire)."""
+    bbox = [cx - radius, cy - radius, cx + radius, cy + radius]
+    draw.ellipse(bbox, outline=pal.gauge_bg, width=stroke)
+    if percent is None:
+        return
+    p = min(100.0, max(0.0, percent))
+    if p <= 0.5:
+        return
+    draw.arc(
+        bbox, -90, -90 + 3.6 * p,
+        fill=_interpolate_color(pal.gauge_start, pal.gauge_end, p / 100.0),
+        width=stroke,
+    )
+
+
+def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=16):
+    """Ligne disque : marqueur + montage en accent, valeurs en texte."""
+    font = _load_font(size)
+    marker = "▸"
+    mount = disk.get("mount", "?")
+    rest = f"  {_fmt_pair(disk)} ({disk.get('percent', 0):.0f}%)"
+    w1 = _text_len(draw, marker, font)
+    w2 = _text_len(draw, mount, font)
+    w3 = _text_len(draw, rest, font)
+    total = w1 + 4 + w2 + w3
+    x = cx - total / 2
+    draw.text((x, y), marker, font=font, fill=pal.accent)
+    draw.text((x + w1 + 4, y), mount, font=font, fill=pal.accent)
+    draw.text((x + w1 + 4 + w2, y), rest, font=font, fill=pal.text)
+
+
+# ── Disposition 1 : classique (référence historique, corrigée) ──────
+
+def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: str):
+    """Liste verticale historique — géométrie conservée, deux corrections.
+
+    1. Marquage ``●`` (DejaVu) au lieu des emojis 🌡/🎮/💾/💿 qui ne sont pas
+       dessinables par DejaVuSans-Bold (carrés vides) ;
+    2. largeur de ligne = ``min(chord(y), chord(y+44)) − 4`` : couvre le texte
+       ET la jauge, sans plus déborder du cercle sûr (avant : ~6 px de
+       dépassement aux coins hauts, jusqu'à 79 pixels hors du cercle).
+    """
+    f_title = _load_font(32)
+    f_label = _load_font(24)
+    f_value = _load_font(24)
+    f_small = _load_font(20)
+
+    y = 110
+    _draw_center(draw, CENTER[0], y, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], y + 35, now_text, f_small, pal.text)
     y += 60
 
-    # ── Lignes de stats ──
     row_h = 70
-    
-    def add_row(label, value_str, percent, icon="•"):
+
+    def add_row(label, value_str, percent, marker="●"):
         nonlocal y
-        width = _get_row_width(y + 20)
+        # Correction : la largeur doit couvrir TOUTE la ligne (texte
+        # y..y+23 puis jauge y+30..y+44), pas seulement y+20.
+        width = min(_get_row_width(y), _get_row_width(y + 44)) - 4
         if width < 100:
             return
-        
-        # Positionnement centré
-        x_start = CENTER[0] - width // 2
-        
-        # Label et Icône
-        draw.text((x_start, y), icon, fill=theme.accent, font=font_value)
-        draw.text((x_start + 30, y), label, fill=theme.text, font=font_label)
-        
-        # Valeur à droite
-        vw = draw.textlength(value_str, font=font_value)
-        draw.text((x_start + width - vw, y), value_str, fill=theme.text, font=font_value)
-        
-        # Jauge centrée sous le texte
-        _draw_gauge(draw, x_start + 30, y + 30, width - 60, 14, percent, theme)
+        x_start = CENTER[0] - width / 2
+        draw.text((x_start, y), marker, font=f_value, fill=pal.accent)
+        draw.text((x_start + 30, y), label, font=f_label, fill=pal.text)
+        _draw_right(draw, x_start + width, y, value_str, f_value, pal.text)
+        _draw_gauge(draw, x_start + 30, y + 30, width - 60, 14, percent, pal)
         y += row_h
 
-    # ── CPU ──
     if "cpu" in options:
-        cpu_temp = stats.get("cpu_temp")
-        cpu_str = f"{cpu_temp:.0f}°C" if cpu_temp is not None else "—"
-        add_row("CPU", cpu_str, stats.get("cpu_percent"), "🌡")
-
-    # ── GPU ──
+        add_row("CPU", _fmt_temp(stats.get("cpu_temp")),
+                stats.get("cpu_percent"))
     if "gpu" in options:
-        gpu_temp = stats.get("gpu_temp")
-        gpu_str = f"{gpu_temp:.0f}°C" if gpu_temp is not None else "—"
-        add_row("GPU", gpu_str, None, "🎮")
-
-    # ── RAM ──
+        add_row("GPU", _fmt_temp(stats.get("gpu_temp")), None)
     if "ram" in options:
-        ram = stats.get("ram") or {}
-        ram_str = f"{_fmt_bytes(ram.get('used'))} / {_fmt_bytes(ram.get('total'))}"
-        add_row("RAM", ram_str, ram.get("percent"), "💾")
-
-    # ── VRAM ──
+        add_row("RAM", _fmt_pair(stats.get("ram")), _pct_of(stats, "ram"))
     if "vram" in options:
-        vram = stats.get("vram") or {}
-        vram_str = f"{_fmt_bytes(vram.get('used'))} / {_fmt_bytes(vram.get('total'))}"
-        add_row("VRAM", vram_str, vram.get("percent"), "🎮")
-
-    # ── Disques ──
+        add_row("VRAM", _fmt_pair(stats.get("vram")), _pct_of(stats, "vram"))
     if "disks" in options:
         for d in (stats.get("disks") or [])[:2]:
-            mount = d.get("mount", "?")
-            dstr = f"{_fmt_bytes(d.get('used'))} / {_fmt_bytes(d.get('total'))}"
-            add_row(mount, dstr, d.get("percent"), "💿")
+            add_row(d.get("mount", "?"), _fmt_pair(d), d.get("percent"))
 
-    # ── Température Liquide (uniquement si l'option est active) ──
     if "liquid" in options:
         liquid = stats.get("liquid_temp")
         if liquid is not None:
             y_liq = 500
-            width_liq = _get_row_width(y_liq)
-            if width_liq > 100:
-                txt = f"Liquid Temperature: {liquid:.1f}°C"
-                tw_liq = draw.textlength(txt, font=font_small)
-                draw.text((CENTER[0] - tw_liq // 2, y_liq), txt, fill=theme.accent, font=font_small)
+            if _get_row_width(y_liq) > 100:
+                _draw_center(draw, CENTER[0], y_liq,
+                             f"Liquid Temperature: {liquid:.1f}°C",
+                             f_small, pal.accent)
+
+
+# ── Disposition 2 : grand format deux colonnes ──────────────────────
+
+def _render_duo(draw, pal: Palette, stats: dict, options: list, now_text: str):
+    """Deux colonnes, valeurs principales en très grand (f76).
+
+    Héros (2 emplacements) : premières métriques actives dans l'ordre
+    CPU > GPU > LIQUID > RAM > VRAM (le liquide est promu si CPU/GPU est
+    désactivé). Le reste tient dans une grille 2×2 ; les disques occupent
+    une bande basse.
+    """
+    f_title = _load_font(28)
+    f_time = _load_font(18)
+    f_hero_label = _load_font(22)
+    f_hero_main = _load_font(76)
+    f_hero_unit = _load_font(26)
+    f_hero_pct = _load_font(30)
+    f_sub = _load_font(18)
+    f_caption = _load_font(15)
+    f_cell_label = _load_font(20)
+    f_cell_value = _load_font(26)
+    f_cell_detail = _load_font(15)
+
+    _draw_center(draw, CENTER[0], 98, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], 130, now_text, f_time, pal.text)
+
+    heroes = hero_metrics(options)
+    # Cellules secondaires : ordre de lecture classique (liquide en dernier).
+    rest = secondary_metrics(options)
+    disks = (stats.get("disks") or [])[:2] if "disks" in options else []
+
+    hero_x = {0: 180, 1: 460}
+    for i, metric in enumerate(heroes):
+        cx = CENTER[0] if len(heroes) == 1 else hero_x[i]
+        _draw_center(draw, cx, 168, _metric_label(metric), f_hero_label, pal.accent)
+
+        main, unit = _hero_text(stats, metric)
+        unit_font = f_hero_unit if unit == "°C" else f_hero_pct
+        _draw_combo(draw, cx, 198, main, unit, f_hero_main, unit_font, pal.text)
+
+        if metric in ("ram", "vram"):
+            _draw_center(draw, cx, 286, _fmt_pair(stats.get(metric)), f_sub, pal.text)
+
+        gauge_p = _gauge_percent(stats, metric)
+        if gauge_p is not None:
+            _draw_gauge(draw, cx - 110, 306, 220, 14, gauge_p, pal)
+        if metric == "cpu" and stats.get("cpu_percent") is not None:
+            _draw_center(draw, cx, 326,
+                         f"charge {stats['cpu_percent']:.0f} %", f_caption, pal.text)
+        elif metric == "liquid":
+            _draw_center(draw, cx, 326, "échelle 20–50 °C", f_caption, pal.text)
+
+    # Séparateur
+    draw.line([(160, 352), (480, 352)], fill=pal.gauge_bg, width=2)
+
+    # Grille secondaire 2×2 (cellule orpheline centrée)
+    cols = [(76, 234), (330, 234)]
+    rows = [362, 432]
+    asc_label = f_cell_label.getmetrics()[0]
+    asc_value = f_cell_value.getmetrics()[0]
+    for idx, metric in enumerate(rest[:4]):
+        col, row = idx % 2, idx // 2
+        orphan = (idx == len(rest) - 1 and len(rest) % 2 == 1)
+        if orphan:
+            col = None
+        x, w = cols[col if col is not None else 0]
+        if col is None:
+            x = CENTER[0] - w / 2
+        yy = rows[row]
+        draw.text((x, yy), _metric_label(metric), font=f_cell_label, fill=pal.text)
+        if metric in ("cpu", "gpu"):
+            value = _fmt_temp(stats.get(f"{metric}_temp"))
+        elif metric == "liquid":
+            value = _fmt_temp_dec(stats.get("liquid_temp"))
+        else:
+            p = _pct_of(stats, metric)
+            value = "—" if p is None else f"{p:.0f} %"
+        _draw_right(draw, x + w, yy + asc_label - asc_value, value,
+                    f_cell_value, pal.text)
+        _draw_gauge(draw, x, yy + 28, w, 12, _gauge_percent(stats, metric), pal)
+        if metric in ("ram", "vram"):
+            draw.text((x, yy + 44), _fmt_pair(stats.get(metric)),
+                      font=f_cell_detail, fill=pal.text)
+        elif metric == "liquid":
+            draw.text((x, yy + 44), "échelle 20–50 °C",
+                      font=f_cell_detail, fill=pal.text)
+
+    # Bande disques
+    dy = 506
+    for d in disks:
+        _draw_disk_line(draw, CENTER[0], dy, d, pal, size=16)
+        dy += 22
+
+
+# ── Disposition 3 : anneaux de progression ──────────────────────────
+
+def _render_rings(draw, pal: Palette, stats: dict, options: list, now_text: str):
+    """Grille adaptative d'anneaux (r=80, trait 14), valeur au centre.
+
+    L'anneau représente la fraction de plage utile : température mappée
+    20–90 °C (CPU/GPU), 20–50 °C (liquide), pourcentage direct (RAM/VRAM).
+    Les 4 premières métriques actives (ordre CPU, GPU, RAM, VRAM, LIQUID)
+    occupent les emplacements ; la 5ᵉ (le liquide en pratique) et les
+    disques s'affichent en pied de cercle.
+    """
+    f_title = _load_font(26)
+    f_time = _load_font(18)
+    f_label = _load_font(17)
+    f_main = _load_font(36)
+    f_unit = _load_font(20)
+    f_sub = _load_font(14)
+
+    _draw_center(draw, CENTER[0], 96, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], 126, now_text, f_time, pal.text)
+
+    # Emplacements adaptatifs : 1 centré, 2 en ligne, 3 en triangle, 4 en grille.
+    rings = ring_metrics(options)
+    overflow = ring_overflow_metrics(options)
+    slots = ring_slot_set(len(rings))
+
+    for idx, metric in enumerate(rings):
+        cx, cy = slots[idx]
+        _draw_ring(draw, cx, cy, 80, 14, _gauge_percent(stats, metric), pal)
+        _draw_center(draw, cx, cy - 48, _metric_label(metric), f_label, pal.accent)
+
+        main, unit = _hero_text(stats, metric)
+        _draw_combo(draw, cx, cy - 14, main, unit, f_main, f_unit, pal.text)
+
+        sub = None
+        if metric == "cpu" and stats.get("cpu_percent") is not None:
+            sub = f"charge {stats['cpu_percent']:.0f} %"
+        elif metric in ("ram", "vram"):
+            sub = _fmt_pair(stats.get(metric)).replace(" / ", "/")
+        if sub:
+            _draw_center(draw, cx, cy + 28, sub, f_sub, pal.text)
+
+    # Pied de cercle : liquide (si pas d'anneau) puis disques en texte.
+    footer_y = 524
+    if "liquid" in overflow and stats.get("liquid_temp") is not None:
+        _draw_center(draw, CENTER[0], footer_y,
+                     f"Liquid Temperature: {stats['liquid_temp']:.1f}°C",
+                     _load_font(20), pal.accent)
+        footer_y = 550
+    if "disks" in options:
+        for d in (stats.get("disks") or [])[:2]:
+            # Garde-fou : ne pas dessiner une ligne disque dont le bas
+            # sortirait du cercle sûr (cas 2 disques + liquide en pied).
+            if _get_row_width(footer_y + 24) < 280:
+                break
+            _draw_disk_line(draw, CENTER[0], footer_y, d, pal, size=16)
+            footer_y += 22
+
+
+# Dispatch disposition → fonction de rendu.
+RENDERERS = {
+    "classic": _render_classic,
+    "duo": _render_duo,
+    "rings": _render_rings,
+}
+
+
+# ── Point d'entrée ──────────────────────────────────────────────────
+
+DEFAULT_OPTIONS = ["cpu", "gpu", "ram", "vram", "disks", "liquid"]
+
+
+def render_monitoring_image(stats: dict, output_path: str,
+                            theme_name: str = None, options: list = None,
+                            now=None, palette: str = None,
+                            layout: str = None) -> bool:
+    """Génère l'image 640×640 de monitoring (palette × disposition).
+
+    Args:
+        stats: Dictionnaire des stats système.
+        output_path: Chemin de sauvegarde.
+        theme_name: **Rétrocompatibilité** — ancien nom du thème, interprété
+            comme ``palette=theme_name`` + ``layout="classic"``.
+        options: Liste des capteurs à afficher (ex: ``['cpu', 'gpu']``).
+        now: Heure à afficher (datetime/chaîne). None = heure courante ;
+            une valeur figée rend le PNG reproductible (vignettes en cache).
+        palette: Clé de palette (``PALETTES``). Prioritaire sur ``theme_name``.
+        layout: Clé de disposition (``LAYOUTS``). Par défaut ``DEFAULT_LAYOUT``
+            (« duo ») pour un nouveau rendu, sauf en mode rétrocompatible
+            ``theme_name`` où l'on conserve « classic ».
+
+    Un appel positionnel de style ``(stats, path, palette, layout, options,
+    now)`` est également reconnu (le 3ᵉ argument est une palette connue et le
+    4ᵉ une disposition connue).
+    """
+    if not PIL_AVAILABLE:
+        return False
+
+    # Appel positionnel « nouveau style » : (palette, layout[, options[, now]]).
+    if isinstance(options, str) and options in LAYOUTS and theme_name in PALETTES:
+        palette, layout, options, now = theme_name, options, now, palette
+        theme_name = None
+
+    if palette is None:
+        palette = theme_name if theme_name else DEFAULT_PALETTE
+    if layout is None:
+        layout = "classic" if theme_name is not None else DEFAULT_LAYOUT
+
+    pal = PALETTES.get(palette) or PALETTES[DEFAULT_PALETTE]
+    if layout not in RENDERERS:
+        layout = DEFAULT_LAYOUT
+    if options is None:
+        options = list(DEFAULT_OPTIONS)
+
+    img = Image.new("RGB", SCREEN_SIZE, pal.bg)
+    draw = ImageDraw.Draw(img)
+    RENDERERS[layout](draw, pal, stats, list(options), _time_text(now))
 
     try:
         img.save(output_path, "PNG")
@@ -444,7 +915,24 @@ def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "da
         return False
 
 
-# ── Vignettes des thèmes (galerie web) ──────────────────────────────
+def count_pixels_outside_safe(img, palette: Palette, tol: int = 16) -> int:
+    """Compte les pixels non-fond au-delà du cercle sûr (rayon 300).
+
+    ``tol`` absorbe l'antialiasing des bords (idem prototype de faisabilité).
+    """
+    px = img.load()
+    limit = SAFE_RADIUS ** 2 + tol
+    bad = 0
+    width, height = img.size
+    for yy in range(height):
+        for xx in range(width):
+            dx, dy = xx - CENTER[0], yy - CENTER[1]
+            if dx * dx + dy * dy > limit and px[xx, yy] != palette.bg:
+                bad += 1
+    return bad
+
+
+# ── Vignettes (galerie web) ─────────────────────────────────────────
 
 THUMB_SIZE = 150       # Taille (px) des vignettes servies par l'API
 # Heure FIGÉE des vignettes : rendu déterministe → cache disque réutilisable.
@@ -467,23 +955,19 @@ THEME_SAMPLE_STATS = {
 }
 
 
-def render_theme_thumbnail(theme_key: str, output_path: str, size: int = THUMB_SIZE) -> bool:
-    """Génère la vignette d'un thème avec le VRAI moteur de rendu.
-
-    Rendu 640×640 déterministe (stats d'exemple + heure figée THUMB_NOW)
-    puis réduction LANCZOS vers ``size`` px : mêmes polices, mêmes
-    positions et mêmes jauges que l'aperçu. Retourne False si Pillow est
-    indisponible ou si le thème est inconnu.
-    """
-    if not PIL_AVAILABLE or theme_key not in THEMES:
+def _render_thumbnail(palette: str, layout: str, output_path: str,
+                      size: int = THUMB_SIZE) -> bool:
+    """Rendu 640×640 déterministe puis réduction LANCZOS vers ``size`` px."""
+    if not PIL_AVAILABLE:
         return False
     import tempfile
     tmp = None
     try:
-        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="bxrgb_theme_thumb_")
+        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="bxrgb_thumb_")
         os.close(fd)
         if not render_monitoring_image(
-            THEME_SAMPLE_STATS, tmp, theme_key, now=THUMB_NOW
+            THEME_SAMPLE_STATS, tmp, options=list(DEFAULT_OPTIONS),
+            now=THUMB_NOW, palette=palette, layout=layout,
         ):
             return False
         with Image.open(tmp) as full:
@@ -500,6 +984,34 @@ def render_theme_thumbnail(theme_key: str, output_path: str, size: int = THUMB_S
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def render_theme_thumbnail(theme_key: str, output_path: str,
+                           size: int = THUMB_SIZE) -> bool:
+    """Vignette d'une PALETTE (alias historique), rendue en disposition classic.
+
+    Conservé pour la rétrocompatibilité : ``theme_key`` est une clé de
+    palette et le rendu utilise la disposition « classic » (comportement
+    visuel des vignettes historiques).
+    """
+    if not PIL_AVAILABLE or theme_key not in PALETTES:
+        return False
+    return _render_thumbnail(theme_key, "classic", output_path, size)
+
+
+def render_palette_thumbnail(palette_key: str, output_path: str,
+                             size: int = THUMB_SIZE) -> bool:
+    """Vignette d'une palette (rendu classic, comme les vignettes d'origine)."""
+    return render_theme_thumbnail(palette_key, output_path, size)
+
+
+def render_layout_thumbnail(layout_key: str, output_path: str,
+                            size: int = THUMB_SIZE,
+                            palette: str = DEFAULT_PALETTE) -> bool:
+    """Vignette d'une disposition, rendue avec la palette par défaut."""
+    if not PIL_AVAILABLE or layout_key not in LAYOUTS:
+        return False
+    return _render_thumbnail(palette, layout_key, output_path, size)
 
 
 # ── Compatibilité ───────────────────────────────────────────────────

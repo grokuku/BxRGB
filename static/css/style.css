@@ -419,11 +419,11 @@ body {
   box-shadow: var(--card-shadow);
   padding: 14px;
 }
-.card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .card-title { font-size: 13px; font-weight: 700; letter-spacing: .3px; }
 .card-head .badge { margin-left: auto; }
 .card-head .hint { margin-left: auto; }
-.card-head-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.card-head-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .card-head-tools .btn-icon { padding: 4px 8px; font-size: 13px; }
 .hint { font-size: 11.5px; color: var(--faint); }
 .hint-warn { font-size: 11.5px; color: var(--warn); }
@@ -624,6 +624,14 @@ input[type="range"]:disabled::-webkit-slider-thumb { background: var(--brd); bor
 }
 .kraken-status-error code { font-family: var(--mono); }
 .kraken-devices { font-size: .75rem; color: var(--dim); margin-top: .5rem; word-break: break-all; }
+.kraken-status-note { font-size: .75rem; color: var(--warn); margin-top: .5rem; }
+.kraken-raw { margin-top: .5rem; font-size: .75rem; color: var(--dim); }
+.kraken-raw summary { cursor: pointer; color: var(--warn); }
+.kraken-raw pre {
+  margin: .4rem 0 0; padding: .5rem; max-height: 140px; overflow: auto;
+  background: var(--inset-bg); border: 1px solid var(--brd-2); border-radius: 8px;
+  font-family: var(--mono); font-size: .7rem; white-space: pre-wrap; word-break: break-all;
+}
 .devices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .devices span {
   font-family: var(--mono); font-size: 10.5px; padding: 3px 8px;
@@ -749,6 +757,39 @@ input[type="range"]:disabled::-webkit-slider-thumb { background: var(--brd); bor
   display: block; font-size: 10.5px; font-weight: 700;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.theme-sub {
+  display: block; font-size: 9.5px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── Kraken : sélecteur de PALETTES (nuancier, sans écran) ── */
+.theme-card[data-palette="data_center"] { --tc: #00a0ff; }
+.theme-card[data-palette="overclock"] { --tc: #ff2828; }
+.theme-card[data-palette="fluid_flow"] { --tc: #78d2ff; }
+.theme-card[data-palette="graphite"] { --tc: #aab1bc; }
+.theme-card[data-palette="amber"] { --tc: #ffb020; }
+.palette-swatches {
+  display: flex; width: 100%; height: 38px;
+  border-radius: 8px; overflow: hidden;
+  border: 1px solid rgba(128, 128, 128, .25);
+}
+.palette-swatches i { flex: 1; display: block; height: 100%; }
+.palette-card { min-height: 78px; }
+/* Galerie palette plafonnée : 12 palettes (scénario « many ») débordent
+   volontairement → scroll interne, comme l'ancienne galerie de thèmes. */
+.palette-gallery { max-height: 236px; }
+
+/* ── Kraken : sélecteur de DISPOSITIONS (mini-écran PNG) ── */
+.layout-gallery {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px;
+  margin-top: 2px;
+}
+.layout-card { min-width: 0; }
+.layout-thumb {
+  display: block; width: 100%; max-width: 140px; height: auto;
+  aspect-ratio: 1 / 1; object-fit: contain; border-radius: 10px;
+  background: #05080c; border: 1px solid rgba(128, 128, 128, .25);
+}
 
 /* ── Écran LCD simulé (rendu fidèle au PIL 640×640) ─────── */
 .lcd {
@@ -871,5 +912,6 @@ html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *
   .dnd-container { grid-template-columns: repeat(2, 1fr); }
   .theme-gallery { grid-template-columns: 1fr; justify-items: center; }
   .theme-card { width: 100%; }
+  .layout-gallery { grid-template-columns: 1fr; }
   .sensors { grid-template-columns: 1fr; }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Captures 1440×900 de la galerie des thèmes (peu / beaucoup de thèmes).
+# Captures 1440×900 des sélecteurs Palette × Disposition (5 / 12 palettes).
 # Usage (depuis la racine BxRGB) : bash tests/front/screenshots.sh
 # Dépendance : /usr/bin/chromium (surcharge : CHROMIUM=…).
 set -u
@@ -28,10 +28,10 @@ shot() {  # $1 = label, $2 = query
 
 mkdir -p "$DIR/out"
 PID="$(start_server)"; sleep 0.5
-shot "gallery-3-themes" "tab=kraken&pack=neon"
-shot "gallery-3-themes-clair" "tab=kraken&pack=bxrgb-clair"
+shot "settings-palette-layout" "tab=kraken&pack=neon"
+shot "settings-palette-layout-clair" "tab=kraken&pack=bxrgb-clair"
 stop_server "$PID"
 
 PID="$(start_server)"; sleep 0.5
-shot "gallery-12-themes" "themes=many&tab=kraken&pack=neon"
+shot "settings-palette-layout-many" "themes=many&tab=kraken&pack=neon"
 stop_server "$PID"

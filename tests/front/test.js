@@ -1,5 +1,5 @@
 /**
- * Assertions du harnais BxRGB (?test=1|save|save2|kraken|themes).
+ * Assertions du harnais BxRGB (?test=1|save|save2|kraken|kraken-empty|themes).
  * Injecté en <head> par server.js AVANT app.js pour :
  *   - collecter les erreurs JS dès le premier script ;
  *   - capter le log « Ballistix RGB Controller prêt » (window.__appReady).
@@ -117,7 +117,7 @@
   /* ═══════════════ ?test=save — modèle Save/Cancel ═══════════════ */
   async function suiteSave() {
     await waitFor(() =>
-      document.querySelectorAll('#theme-gallery .theme-thumb').length >= 3, 5000);
+      document.querySelectorAll('#layout-gallery .layout-thumb').length >= 3, 5000);
 
     check('repos : Enregistrer désactivé', document.getElementById('btn-save').disabled === true);
     check('repos : badge dirty masqué', document.getElementById('dirty-badge').hidden === true);
@@ -135,14 +135,14 @@
     check('PUT luminosité immédiat (temps réel)',
       calls(await stats(), '/api/sticks/stick_0/brightness').length >= 1);
 
-    // Thème LCD : temps réel débouncé.
-    document.querySelectorAll('#theme-gallery .theme-card')[1].click();
+    // Palette LCD : temps réel débouncé.
+    document.querySelector('#palette-gallery .palette-card[data-palette="overclock"]').click();
     await sleep(700);
     const updates = calls(await stats(), '/api/kraken/display/update');
     const lastUpdate = updates[updates.length - 1];
-    check('thème appliqué en temps réel (display/update)',
-      !!lastUpdate && lastUpdate.body && lastUpdate.body.theme === 'overclock',
-      lastUpdate && lastUpdate.body && lastUpdate.body.theme);
+    check('palette appliquée en temps réel (display/update)',
+      !!lastUpdate && lastUpdate.body && lastUpdate.body.palette === 'overclock',
+      lastUpdate && lastUpdate.body && lastUpdate.body.palette);
 
     // Save fige la référence.
     document.getElementById('btn-save').click();
@@ -162,21 +162,25 @@
     check('Annuler → POST /api/restore', calls(await stats(), '/api/restore').length >= 1);
     await waitFor(() => slider.value === '111', 4000);
     check('luminosité restaurée (111)', slider.value === '111', slider.value);
-    check('thème restauré (overclock)',
-      document.getElementById('theme-key').textContent === 'overclock',
-      document.getElementById('theme-key').textContent);
+    check('palette restaurée (overclock)',
+      document.getElementById('palette-key').textContent === 'overclock',
+      document.getElementById('palette-key').textContent);
     check('après cancel : badge dirty masqué', document.getElementById('dirty-badge').hidden === true);
   }
 
   /* ═══════════ ?test=save2 — F5 : hydratation depuis la référence ═══════════ */
   async function suiteSave2() {
     await waitFor(() =>
-      document.querySelectorAll('#theme-gallery .theme-thumb').length >= 3, 5000);
-    check('thème hydraté depuis la référence (overclock)',
-      document.getElementById('theme-key').textContent === 'overclock',
-      document.getElementById('theme-key').textContent);
-    const selected = document.querySelector('#theme-gallery .theme-card.selected');
-    check('carte selected = overclock', !!selected && selected.dataset.theme === 'overclock');
+      document.querySelectorAll('#layout-gallery .layout-thumb').length >= 3, 5000);
+    check('palette hydratée depuis la référence (overclock)',
+      document.getElementById('palette-key').textContent === 'overclock',
+      document.getElementById('palette-key').textContent);
+    const selected = document.querySelector('#palette-gallery .palette-card.selected');
+    check('carte palette selected = overclock',
+      !!selected && selected.dataset.palette === 'overclock');
+    check('disposition hydratée (duo)',
+      document.getElementById('layout-key').textContent === 'duo',
+      document.getElementById('layout-key').textContent);
     check('luminosité hydratée (111)',
       document.getElementById('brightness-slider').value === '111',
       document.getElementById('brightness-slider').value);
@@ -187,11 +191,41 @@
     check('intervalle hydraté (10 s)', document.getElementById('kraken-interval').value === '10');
   }
 
+  /* ═══════════ ?test=kraken-empty — statut illisible : diagnostic visible ═══════════ */
+  async function suiteKrakenEmpty() {
+    document.querySelector('.tab-btn[data-tab="kraken"]').click();
+    await waitFor(() =>
+      document.getElementById('kraken-badge').textContent.indexOf('Détecté') !== -1, 3000);
+    const el = document.getElementById('kraken-status');
+    check('badge Détecté (device vu)',
+      document.getElementById('kraken-badge').textContent.indexOf('Détecté') !== -1);
+    const values = Array.prototype.slice.call(el.querySelectorAll('.kraken-stat-value'));
+    check('les 3 valeurs restent en tiret',
+      values.length === 3 && values.every((v) => v.textContent.trim() === '—'),
+      values.map((v) => v.textContent.trim()).join('|'));
+    check('bandeau « statut illisible » affiché',
+      el.querySelector('.kraken-status-error') !== null);
+    check('cause remontée par le serveur affichée',
+      el.textContent.indexOf('Sortie liquidctl non reconnue') !== -1);
+    check('commande de diagnostic affichée',
+      el.textContent.indexOf('liquidctl --match Kraken status') !== -1);
+    const raw = el.querySelector('details.kraken-raw pre');
+    check('sortie brute consultable',
+      raw !== null && raw.textContent.indexOf('Liquid temperature') !== -1);
+    check('contrôles encore actifs (device détecté)',
+      document.getElementById('kraken-btn-monitor').disabled === false);
+  }
   /* ═══════════ ?test=kraken — temps réel vague 2 ═══════════ */
   async function suiteKraken() {
     document.querySelector('.tab-btn[data-tab="kraken"]').click();
     await waitFor(() =>
-      document.querySelectorAll('#theme-gallery .theme-thumb').length >= 3, 5000);
+      document.querySelectorAll('#layout-gallery .layout-thumb').length >= 3, 5000);
+    await waitFor(() =>
+      document.getElementById('kraken-badge').textContent.indexOf('Détecté') !== -1, 3000);
+    check('statut complet : aucun avertissement affiché',
+      document.querySelectorAll('#kraken-status .kraken-status-error').length === 0);
+    check('statut complet : pas de note de valeur manquante',
+      document.querySelectorAll('#kraken-status .kraken-status-note').length === 0);
 
     // Capteurs : décocher GPU + liquid → display/update débouncé 400 ms.
     document.getElementById('kraken-gpu').click();
@@ -234,8 +268,9 @@
       document.getElementById('kraken-btn-stop-display').disabled === false);
     const starts = calls(await stats(), '/api/kraken/monitor/start');
     check('POST monitor/start', starts.length >= 1);
-    check('monitor/start porte thème + options',
-      !!starts[starts.length - 1] && !!starts[starts.length - 1].body.theme &&
+    check('monitor/start porte palette + disposition + options',
+      !!starts[starts.length - 1] && !!starts[starts.length - 1].body.palette &&
+      !!starts[starts.length - 1].body.layout &&
       Array.isArray(starts[starts.length - 1].body.options));
 
     // Aperçu manuel 👁.
@@ -256,96 +291,115 @@
     check('POST display/stop', calls(await stats(), '/api/kraken/display/stop').length >= 1);
   }
 
-  /* ═══════════ ?test=themes — vraies vignettes + galerie compacte ═══════════ */
+  /* ═══ ?test=themes — deux sélecteurs : palette + disposition ═══ */
   async function suiteThemes() {
     const many = params.get('themes') === 'many';
-    const expected = many ? 12 : 3;
+    const expPalettes = many ? 12 : 5;
+    const expLayouts = many ? 6 : 3;
     document.querySelector('.tab-btn[data-tab="kraken"]').click();
 
     const loaded = await waitFor(() =>
-      document.querySelectorAll('#theme-gallery .theme-thumb').length >= 3, 6000);
-    check('vignettes <img> servies par l’endpoint', loaded);
+      document.querySelectorAll('#layout-gallery .layout-thumb').length >= 3, 6000);
+    check('vignettes de disposition <img> servies', loaded);
 
     const imgs = Array.prototype.slice.call(
-      document.querySelectorAll('#theme-gallery .theme-thumb'));
-    check('src = /api/kraken/themes/{key}/thumb.png',
+      document.querySelectorAll('#layout-gallery .layout-thumb'));
+    check('src = /api/kraken/layouts/{key}/thumb.png',
       imgs.length > 0 && imgs.every((i) =>
-        i.getAttribute('src').indexOf('/api/kraken/themes/') === 0 &&
+        i.getAttribute('src').indexOf('/api/kraken/layouts/') === 0 &&
         i.getAttribute('src').slice(-10) === '/thumb.png'));
     check('loading=lazy + decoding=async',
       imgs.every((i) => i.loading === 'lazy' && i.decoding === 'async'));
     check('simulation CSS retirée après chargement',
-      document.querySelectorAll('#theme-gallery .lcd').length === 0);
+      document.querySelectorAll('#layout-gallery .lcd').length === 0);
+
+    const paletteCards = document.querySelectorAll('#palette-gallery .palette-card');
+    check('nuancier palette = catalogue',
+      paletteCards.length === expPalettes, paletteCards.length);
+    check('chaque palette a 6 couleurs',
+      Array.from(paletteCards).every((c) =>
+        c.querySelectorAll('.palette-swatches i').length === 6));
 
     const st = await stats();
     check('requêtes de vignettes observées côté serveur',
-      st.thumbRequests.length >= Math.min(expected, 8), st.thumbRequests.length);
-    check('compteur de thèmes',
-      document.getElementById('theme-count').textContent.trim() === expected + ' thèmes',
+      st.thumbRequests.length >= Math.min(expLayouts, 8), st.thumbRequests.length);
+    check('compteur palettes · dispositions',
+      document.getElementById('theme-count').textContent.trim() ===
+        expPalettes + ' palettes · ' + expLayouts + ' dispositions',
       document.getElementById('theme-count').textContent.trim());
-    check('cartes = nombre de thèmes',
-      document.querySelectorAll('#theme-gallery .theme-card').length === expected);
+    check('cartes disposition = catalogue',
+      document.querySelectorAll('#layout-gallery .layout-card').length === expLayouts);
 
-    // Sélection d'une vignette → aperçu auto (débounce ~400 ms).
+    // Sélection palette (non défaut) → temps réel + aperçu + dirty.
     const beforePreview = (await stats()).previewGenerations;
-    const gallery = document.getElementById('theme-gallery');
-    const cards = Array.prototype.slice.call(gallery.querySelectorAll('.theme-card'));
-    const target = cards[2];
-    const childrenBefore = Array.prototype.slice.call(gallery.children);
-    target.click();
+    const palTarget = document.querySelector(
+      '#palette-gallery .palette-card[data-palette="graphite"]') || paletteCards[2];
+    palTarget.click();
     await sleep(1000);
-    check('sélection unique', document.querySelectorAll('#theme-gallery .theme-card.selected').length === 1);
-    check('carte sélectionnée = cliquée',
-      document.querySelector('#theme-gallery .theme-card.selected').dataset.theme === target.dataset.theme);
-    check('badge thème mis à jour',
-      document.getElementById('theme-key').textContent === target.dataset.theme);
-    check('aperçu rafraîchi automatiquement',
+    check('palette : sélection unique',
+      document.querySelectorAll('#palette-gallery .palette-card.selected').length === 1);
+    check('badge palette mis à jour',
+      document.getElementById('palette-key').textContent === palTarget.dataset.palette,
+      document.getElementById('palette-key').textContent);
+    check('aperçu rafraîchi (palette)',
       (await stats()).previewGenerations > beforePreview);
-    check('aperçu visible',
-      document.getElementById('kraken-preview-img').classList.contains('hidden') === false);
-    check('display/update temps réel avec le thème cliqué',
+    check('display/update porte la palette',
       calls(await stats(), '/api/kraken/display/update')
-        .some((c) => c.body && c.body.theme === target.dataset.theme));
+        .some((c) => c.body && c.body.palette === palTarget.dataset.palette));
+    check('dirty alimenté après palette',
+      document.getElementById('btn-save').disabled === false &&
+      document.getElementById('dirty-badge').hidden === false);
 
-    const childrenAfter = Array.prototype.slice.call(gallery.children);
-    check('sélection sans re-render du DOM',
-      childrenBefore.length === childrenAfter.length &&
-      childrenBefore.every((n, i) => n === childrenAfter[i]));
+    // Sélection disposition → temps réel + aperçu + dirty.
+    const beforeLay = (await stats()).previewGenerations;
+    const layCards = document.querySelectorAll('#layout-gallery .layout-card');
+    const layTarget = layCards[2] || layCards[1];
+    layTarget.click();
+    await sleep(1000);
+    check('disposition : sélection unique',
+      document.querySelectorAll('#layout-gallery .layout-card.selected').length === 1);
+    check('badge disposition mis à jour',
+      document.getElementById('layout-key').textContent === layTarget.dataset.layout,
+      document.getElementById('layout-key').textContent);
+    check('aperçu rafraîchi (disposition)',
+      (await stats()).previewGenerations > beforeLay);
+    check('display/update porte la disposition',
+      calls(await stats(), '/api/kraken/display/update')
+        .some((c) => c.body && c.body.layout === layTarget.dataset.layout));
 
-    // Densité : vignettes entièrement visibles dans le conteneur plafonné.
-    const gRect = gallery.getBoundingClientRect();
-    const fullyVisible = cards.filter((c) => {
-      const r = c.getBoundingClientRect();
-      return r.top >= gRect.top - 1 && r.bottom <= gRect.bottom + 1;
-    }).length;
-    if (many) {
-      check('≥ 8 vignettes entièrement visibles', fullyVisible >= 8, fullyVisible);
-    } else {
-      check('toutes les vignettes visibles', fullyVisible === cards.length, fullyVisible);
-    }
-    check('vignette ≈ 96 px',
-      Math.round(document.querySelector('.theme-thumb').getBoundingClientRect().width) === 96,
-      Math.round(document.querySelector('.theme-thumb').getBoundingClientRect().width));
+    // Cancel restaure palette + disposition de la référence.
+    document.getElementById('btn-cancel').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 6000);
+    check('Cancel restaure la palette (data_center)',
+      document.getElementById('palette-key').textContent === 'data_center',
+      document.getElementById('palette-key').textContent);
+    check('Cancel restaure la disposition (duo)',
+      document.getElementById('layout-key').textContent === 'duo',
+      document.getElementById('layout-key').textContent);
+
+    // Densité / débordement.
     check('page sans débordement horizontal',
       document.documentElement.scrollWidth <= 1440, document.documentElement.scrollWidth);
+    check('vignette disposition ≈ 140 px',
+      Math.round(document.querySelector('.layout-thumb').getBoundingClientRect().width) === 140,
+      Math.round(document.querySelector('.layout-thumb').getBoundingClientRect().width));
+    check('pas de requête de vignette inattendue',
+      (await stats()).thumbRequests.every((r) => Array.from(
+        document.querySelectorAll('#layout-gallery .layout-card'))
+        .some((c) => c.dataset.layout === r.key)));
 
     if (many) {
-      check('scroll interne disponible', gallery.scrollHeight > gallery.clientHeight + 10,
+      const gallery = document.getElementById('palette-gallery');
+      check('scroll interne palette disponible',
+        gallery.scrollHeight > gallery.clientHeight + 10,
         gallery.scrollHeight + '>' + gallery.clientHeight);
-      const pageY = window.scrollY;
-      gallery.scrollTop = 140;
-      await sleep(150);
-      check('scroll interne actif', gallery.scrollTop > 0, gallery.scrollTop);
-      check('la page n’a pas défilé', window.scrollY === pageY);
     }
-    // Le compteur de vignettes ne doit pas dépasser le nombre de cartes.
-    check('pas de requête de vignette inattendue',
-      (await stats()).thumbRequests.every((r) =>
-        cards.some((c) => c.dataset.theme === r.key)));
   }
 
   const suites = { '1': suiteBase, save: suiteSave, save2: suiteSave2,
-                   kraken: suiteKraken, themes: suiteThemes };
+                   kraken: suiteKraken, 'kraken-empty': suiteKrakenEmpty,
+                   themes: suiteThemes };
 
   window.addEventListener('load', async () => {
     const ready = await waitFor(() => window.__appReady === true, 15000);

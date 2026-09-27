@@ -39,6 +39,7 @@ from .kraken import (
     kraken_gallery_start, kraken_monitor_start, kraken_stop_display,
     kraken_monitor_preview,
     kraken_theme_thumb, kraken_purge_thumbs,
+    kraken_palette_thumb, kraken_layout_thumb,
     kraken_get_settings, kraken_update_settings, kraken_display_status,
     kraken_display_reconfigure, kraken_pending_changes,
     kraken_commit_file_changes, kraken_restore_file_changes,
@@ -123,7 +124,9 @@ def _restore_kraken_hardware(lcd: dict, display: dict) -> None:
         if mode == "monitor":
             kraken_monitor_start(
                 display.get("interval", 10.0),
-                theme=display.get("theme", "data_center"),
+                theme=display.get("theme"),
+                palette=display.get("palette"),
+                layout=display.get("layout"),
                 options=display.get("options"),
             )
         elif mode == "gallery":
@@ -1330,7 +1333,13 @@ class KrakenValueBody(BaseModel):
 
 @app.get("/api/kraken/status")
 async def kraken_status_endpoint():
-    """Statut du Kraken : liquidctl disponible, détection, températures."""
+    """Statut du Kraken : liquidctl disponible, détection, capteurs.
+
+    ``status_missing`` liste les capteurs non extraits de la sortie
+    liquidctl (indisponibles ≠ zéro) et ``status_ok`` dit si la commande
+    a réussi — le front s'en sert pour afficher un diagnostic au lieu de
+    tirets muets.
+    """
     available = kraken_available()
     detect = kraken_detect() if available else {"devices": [], "error": None}
     status = kraken_status() if available else {"ok": False, "data": {}, "raw": "", "error": None}
@@ -1339,6 +1348,9 @@ async def kraken_status_endpoint():
         "detected": bool(detect.get("devices")),
         "devices": detect.get("devices", []),
         "status": status.get("data", {}) if status.get("ok") else {},
+        "status_ok": bool(status.get("ok")),
+        "status_missing": list(status.get("missing") or []),
+        "status_source": status.get("source"),
         "status_raw": status.get("raw", ""),
         "error": detect.get("error") or status.get("error"),
     }
@@ -1410,10 +1422,13 @@ class KrakenDisplayBody(BaseModel):
     """Paramètres du thread d'affichage.
 
     ``interval`` : nombre de secondes (2-60) ou la sentinelle ``"asap"``
-    (« le plus souvent possible »).
+    (« le plus souvent possible »). Le rendu combine ``palette`` ×
+    ``layout`` ; ``theme`` reste accepté (alias historique de palette).
     """
     interval: Union[float, str] = 10.0
-    theme: str = "data_center"
+    theme: Optional[str] = None
+    palette: Optional[str] = None
+    layout: Optional[str] = None
     options: Optional[List[str]] = None
 
 
@@ -1453,6 +1468,8 @@ async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
     return kraken_monitor_start(
         body.interval,
         theme=body.theme,
+        palette=body.palette,
+        layout=body.layout,
         options=body.options,
     )
 
@@ -1461,13 +1478,16 @@ async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
 async def kraken_display_update_endpoint(body: KrakenDisplayBody):
     """Applique en temps réel des réglages d'affichage (sans changer de mode).
 
-    Met à jour thème/capteurs/intervalle et RELANCE le thread monitoring
-    (ou gallery) s'il tourne déjà. Appelé par le front à chaque coche de
-    capteur / changement de thème / changement d'intervalle (débouncé).
+    Met à jour palette/disposition/capteurs/intervalle et RELANCE le thread
+    monitoring (ou gallery) s'il tourne déjà. Appelé par le front à chaque
+    sélection de palette/disposition, coche de capteur ou changement
+    d'intervalle (débouncé).
     """
     return kraken_display_reconfigure(
         interval=body.interval,
         theme=body.theme,
+        palette=body.palette,
+        layout=body.layout,
         options=body.options,
     )
 
@@ -1492,33 +1512,67 @@ async def kraken_display_status_endpoint():
 
 @app.get("/api/kraken/themes")
 async def kraken_themes_endpoint():
-    """Liste des thèmes d'écran LCD (source unique : ballistix/monitor.py).
+    """Catalogue de l'écran LCD : palettes + dispositions (source unique).
 
-    Le front ne recopie plus les thèmes : en ajouter un dans monitor.py
-    suffit pour qu'il apparaisse dans la galerie (vignette comprise).
+    Le front ne recopie plus ni les couleurs ni les dispositions : les
+    catalogues viennent de ``ballistix/monitor.py``. ``themes`` reste un
+    alias des palettes (rétrocompatibilité vague 3) ; ``palettes`` (couleurs
+    incluses) et ``layouts`` alimentent les deux sélecteurs.
     """
     try:
-        from .monitor import list_themes
+        from .monitor import list_themes, list_palettes, list_layouts
     except ImportError:
-        return {"ok": False, "themes": [], "count": 0,
-                "error": "Module de monitoring indisponible"}
+        return {"ok": False, "themes": [], "palettes": [], "layouts": [],
+                "count": 0, "error": "Module de monitoring indisponible"}
     themes = list_themes()
-    return {"ok": True, "themes": themes, "count": len(themes),
+    palettes = list_palettes()
+    layouts = list_layouts()
+    return {
+        "ok": True,
+        "themes": themes,
+        "palettes": palettes,
+        "layouts": layouts,
+        "count": len(themes),
+        "palette_count": len(palettes),
+        "layout_count": len(layouts),
+        "preview_endpoint": "/api/kraken/monitor/preview",
+        "preview_image": "/api/kraken/monitor/preview.png",
+        "error": None,
+    }
+
+
+@app.get("/api/kraken/palettes")
+async def kraken_palettes_endpoint():
+    """Catalogue des palettes (5 entrées, couleurs incluses)."""
+    try:
+        from .monitor import list_palettes
+    except ImportError:
+        return {"ok": False, "palettes": [], "count": 0,
+                "error": "Module de monitoring indisponible"}
+    palettes = list_palettes()
+    return {"ok": True, "palettes": palettes, "count": len(palettes),
             "error": None}
 
 
-@app.get("/api/kraken/themes/{key}/thumb.png")
-async def kraken_theme_thumb_endpoint(key: str):
-    """Vignette PNG d'un thème, générée par le vrai moteur de rendu PIL.
+@app.get("/api/kraken/layouts")
+async def kraken_layouts_endpoint():
+    """Catalogue des dispositions (3 entrées)."""
+    try:
+        from .monitor import list_layouts
+    except ImportError:
+        return {"ok": False, "layouts": [], "count": 0,
+                "error": "Module de monitoring indisponible"}
+    layouts = list_layouts()
+    return {"ok": True, "layouts": layouts, "count": len(layouts),
+            "error": None}
 
-    Cache disque sous ``~/.config/ballistix/kraken/thumbs/`` ; invalidé
-    dès que le moteur (monitor.py) change. Thème inconnu → 404.
-    """
+
+def _serve_thumb(result: dict, key: str):
+    """Réponse FileResponse commune aux endpoints de vignette."""
     from fastapi.responses import FileResponse
-    result = kraken_theme_thumb(key)
     if not result["ok"]:
         if result.get("code") == "unknown":
-            raise HTTPException(404, result.get("error") or f"Thème inconnu : {key}")
+            raise HTTPException(404, result.get("error") or f"Inconnu : {key}")
         raise HTTPException(500, result.get("error") or "Vignette indisponible")
     return FileResponse(
         result["path"],
@@ -1527,13 +1581,37 @@ async def kraken_theme_thumb_endpoint(key: str):
     )
 
 
+@app.get("/api/kraken/themes/{key}/thumb.png")
+async def kraken_theme_thumb_endpoint(key: str):
+    """Vignette PNG d'une palette ou d'une disposition (vrai moteur PIL).
+
+    Cache disque sous ``~/.config/ballistix/kraken/thumbs/`` ; invalidé
+    dès que le moteur (monitor.py) change. Clé inconnue → 404.
+    """
+    return _serve_thumb(kraken_theme_thumb(key), key)
+
+
+@app.get("/api/kraken/palettes/{key}/thumb.png")
+async def kraken_palette_thumb_endpoint(key: str):
+    """Vignette PNG d'une palette (rendue en disposition classic)."""
+    return _serve_thumb(kraken_palette_thumb(key), key)
+
+
+@app.get("/api/kraken/layouts/{key}/thumb.png")
+async def kraken_layout_thumb_endpoint(key: str):
+    """Vignette PNG d'une disposition (rendue avec la palette par défaut)."""
+    return _serve_thumb(kraken_layout_thumb(key), key)
+
+
 @app.post("/api/kraken/monitor/preview")
 async def kraken_monitor_preview_endpoint(body: KrakenDisplayBody = None):
     """Génère un aperçu du rendu monitoring (pour la page web)."""
     body = body or KrakenDisplayBody()
     return kraken_monitor_preview(
-        theme=body.theme, 
-        options=body.options
+        theme=body.theme,
+        palette=body.palette,
+        layout=body.layout,
+        options=body.options,
     )
 
 
