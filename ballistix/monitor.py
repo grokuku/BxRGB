@@ -45,10 +45,11 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageChops, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     Image = None
+    ImageChops = None
     ImageDraw = None
     ImageFont = None
     PIL_AVAILABLE = False
@@ -58,6 +59,15 @@ except ImportError:
 SCREEN_SIZE = (640, 640)          # Écran du Kraken Z53
 CENTER = (320, 320)
 SAFE_RADIUS = 300                # Zone où le texte est visible
+
+# Plancher de lisibilité (px). Retour terrain sur la dalle 640×640 du Kraken
+# Z53 : f16 est illisible, f26 est nettement lisible ; le seuil retenu est
+# f22 → toute information sous ce plancher est SUPPRIMÉE ou fusionnée
+# (jamais réduite à une taille molle).
+MIN_READABLE_SIZE = 22
+# Tailles candidates d'une valeur de cellule secondaire, du plus grand au plus
+# petit : on prend la première qui ne chevauche pas le libellé (jamais < plancher).
+CELL_VALUE_SIZES = (40, 36, 32, 28, 24, MIN_READABLE_SIZE)
 
 # ── Palettes ────────────────────────────────────────────────────────
 #
@@ -558,10 +568,45 @@ def _hero_text(stats: dict, metric: str):
     return ("—" if p is None else f"{p:.0f}"), "%"
 
 
+def _cell_value_text(stats: dict, metric: str) -> str:
+    """Valeur compacte d'une cellule secondaire (jamais de sous-valeur).
+
+    Températures formatées comme les héros ; RAM/VRAM en pourcentage seul
+    (les capacités « 17.8 GB / 31.2 GB » étaient illisibles sur la dalle).
+    """
+    if metric in ("cpu", "gpu"):
+        return _fmt_temp(stats.get(f"{metric}_temp"))
+    if metric == "liquid":
+        return _fmt_temp_dec(stats.get("liquid_temp"))
+    p = _pct_of(stats, metric)
+    return "—" if p is None else f"{p:.0f} %"
+
+
+def _fit_cell_font(draw, label: str, value: str, width: float, label_font,
+                   sizes=CELL_VALUE_SIZES, gap: int = 10):
+    """Plus grande taille de valeur qui laisse libellé + valeur tenir en ``width``.
+
+    Évite le chevauchement (ex. « LIQUID » + « 43.1°C ») sans jamais descendre
+    sous :data:`MIN_READABLE_SIZE`.
+    """
+    label_w = _text_len(draw, label, label_font)
+    for size in sizes:
+        font = _load_font(size)
+        if label_w + _text_len(draw, value, font) + gap <= width:
+            return font
+    return _load_font(MIN_READABLE_SIZE)
+
+
 # ── Helpers de dessin ───────────────────────────────────────────────
 
 def _text_len(draw, s, font):
     return draw.textlength(s, font=font)
+
+
+def _text_height(font) -> int:
+    """Hauteur d'une ligne de texte (ascender + descender de la police)."""
+    asc, desc = font.getmetrics()
+    return asc + desc
 
 
 def _draw_center(draw, cx, y, s, font, fill):
@@ -621,37 +666,91 @@ def _draw_ring(draw, cx, cy, radius, stroke, percent, pal: Palette) -> None:
     )
 
 
-def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=16):
-    """Ligne disque : marqueur + montage en accent, valeurs en texte."""
+def _short_mount(mount) -> str:
+    """Libellé COURT et lisible d'un point de montage (dalle 640×640).
+
+    Règle retenue : la racine reste « / » ; sinon on ne garde que le DERNIER
+    segment du chemin (``/root/.config/ballistix`` → ``ballistix``). Le
+    montage complet était illisible et, en disposition ``classic``, il
+    chevauchait la valeur alignée à droite. Un segment trop long est tronqué
+    avec une ellipse (14 caractères max).
+    """
+    if not mount:
+        return "?"
+    text = str(mount)
+    if text.strip("/") == "":
+        return "/"
+    segments = [s for s in text.rstrip("/").split("/") if s]
+    short = segments[-1] if segments else text
+    return short if len(short) <= 14 else short[:13] + "…"
+
+
+def _disk_line_render(draw, disk, size, compact):
+    """Segments et largeur totale d'une ligne disque (sans rien dessiner)."""
     font = _load_font(size)
-    marker = "▸"
-    mount = disk.get("mount", "?")
-    rest = f"  {_fmt_pair(disk)} ({disk.get('percent', 0):.0f}%)"
+    marker = "●"
+    mount = _short_mount(disk.get("mount", "?"))
+    pct = disk.get("percent") or 0
+    rest = f"  {pct:.0f}%" if compact else f"  {_fmt_pair(disk)} ({pct:.0f}%)"
     w1 = _text_len(draw, marker, font)
     w2 = _text_len(draw, mount, font)
     w3 = _text_len(draw, rest, font)
-    total = w1 + 4 + w2 + w3
+    return marker, mount, rest, font, w1, w2, w3, w1 + 4 + w2 + w3
+
+
+def _disk_line_width(draw, disk, size=None, compact=False) -> float:
+    """Largeur totale d'une ligne disque (pour vérifier qu'elle tient)."""
+    if size is None:
+        size = MIN_READABLE_SIZE
+    return _disk_line_render(draw, disk, size, compact)[-1]
+
+
+def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=None, compact=False,
+                    max_width=None):
+    """Ligne disque : marqueur + libellé court en accent, valeurs en texte.
+
+    ``compact=True`` n'affiche que le pourcentage (pied de ``rings``, où la
+    place est comptée à l'intérieur du cercle). ``max_width`` (optionnel) est
+    la largeur dessinable : si la forme complète la dépasse, on retombe sur la
+    forme compacte plutôt que de réduire la police sous le plancher (doctrine
+    « supprimer/fusionner, jamais rétrécir ») ; si même la forme compacte ne
+    tient pas, la ligne est supprimée. Retourne la largeur dessinée pour que
+    l'appelant puisse vérifier qu'elle tient dans la corde disponible.
+    """
+    if size is None:
+        size = MIN_READABLE_SIZE
+    marker, mount, rest, font, w1, w2, w3, total = _disk_line_render(
+        draw, disk, size, compact)
+    if max_width is not None and total > max_width:
+        if not compact:
+            return _draw_disk_line(draw, cx, y, disk, pal, size=size,
+                                   compact=True, max_width=max_width)
+        return 0.0
     x = cx - total / 2
     draw.text((x, y), marker, font=font, fill=pal.accent)
     draw.text((x + w1 + 4, y), mount, font=font, fill=pal.accent)
     draw.text((x + w1 + 4 + w2, y), rest, font=font, fill=pal.text)
+    return total
 
 
 # ── Disposition 1 : classique (référence historique, corrigée) ──────
 
 def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: str):
-    """Liste verticale historique — géométrie conservée, deux corrections.
+    """Liste verticale historique — géométrie conservée, corrections ciblées.
 
     1. Marquage ``●`` (DejaVu) au lieu des emojis 🌡/🎮/💾/💿 qui ne sont pas
        dessinables par DejaVuSans-Bold (carrés vides) ;
     2. largeur de ligne = ``min(chord(y), chord(y+44)) − 4`` : couvre le texte
        ET la jauge, sans plus déborder du cercle sûr (avant : ~6 px de
-       dépassement aux coins hauts, jusqu'à 79 pixels hors du cercle).
+       dépassement aux coins hauts, jusqu'à 79 pixels hors du cercle) ;
+    3. tous les textes sont relevés au plancher f22 ; la bande liquide du bas
+       est supprimée si la dernière ligne empiète dessus ou si le texte ne
+       tient plus dans la corde.
     """
     f_title = _load_font(32)
     f_label = _load_font(24)
     f_value = _load_font(24)
-    f_small = _load_font(20)
+    f_small = _load_font(MIN_READABLE_SIZE)
 
     y = 110
     _draw_center(draw, CENTER[0], y, "SYSTEM MONITOR", f_title, pal.accent)
@@ -659,19 +758,32 @@ def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: st
     y += 60
 
     row_h = 70
+    last_bottom = None
 
     def add_row(label, value_str, percent, marker="●"):
-        nonlocal y
+        nonlocal y, last_bottom
         # Correction : la largeur doit couvrir TOUTE la ligne (texte
         # y..y+23 puis jauge y+30..y+44), pas seulement y+20.
         width = min(_get_row_width(y), _get_row_width(y + 44)) - 4
         if width < 100:
             return
         x_start = CENTER[0] - width / 2
+        # Repli lisibilité : si libellé + valeur ne tiennent plus côte à côte
+        # (montage long + capacité), on fusionne au pourcentage seul (que la
+        # jauge matérialise déjà) — jamais de textes superposés.
+        label_w = _text_len(draw, label, f_label)
+        value_w = _text_len(draw, value_str, f_value)
+        if 30 + label_w + value_w + 10 > width:
+            value_str = "" if percent is None else f"{percent:.0f}%"
+            value_w = _text_len(draw, value_str, f_value)
+            if 30 + label_w + value_w + 10 > width:
+                value_str = ""
         draw.text((x_start, y), marker, font=f_value, fill=pal.accent)
+        if value_str:
+            _draw_right(draw, x_start + width, y, value_str, f_value, pal.text)
         draw.text((x_start + 30, y), label, font=f_label, fill=pal.text)
-        _draw_right(draw, x_start + width, y, value_str, f_value, pal.text)
         _draw_gauge(draw, x_start + 30, y + 30, width - 60, 14, percent, pal)
+        last_bottom = y + 44
         y += row_h
 
     if "cpu" in options:
@@ -685,109 +797,110 @@ def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: st
         add_row("VRAM", _fmt_pair(stats.get("vram")), _pct_of(stats, "vram"))
     if "disks" in options:
         for d in (stats.get("disks") or [])[:2]:
-            add_row(d.get("mount", "?"), _fmt_pair(d), d.get("percent"))
+            add_row(_short_mount(d.get("mount", "?")),
+                    _fmt_pair(d), d.get("percent"))
 
     if "liquid" in options:
         liquid = stats.get("liquid_temp")
-        if liquid is not None:
-            y_liq = 500
-            if _get_row_width(y_liq) > 100:
-                _draw_center(draw, CENTER[0], y_liq,
-                             f"Liquid Temperature: {liquid:.1f}°C",
-                             f_small, pal.accent)
+        y_liq = 500
+        # Bande liquide : supprimée si la dernière ligne (ex. 2 disques)
+        # empiète dessus, ou si le texte ne tient plus dans la corde à f22 —
+        # la doctrine supprime plutôt que de superposer ou de rétrécir.
+        if (liquid is not None
+                and (last_bottom is None or last_bottom <= y_liq)):
+            text = f"Liquid Temperature: {liquid:.1f}°C"
+            limit = min(_get_row_width(y_liq),
+                        _get_row_width(y_liq + _text_height(f_small))) - 4
+            if _text_len(draw, text, f_small) <= limit:
+                _draw_center(draw, CENTER[0], y_liq, text, f_small, pal.accent)
 
 
 # ── Disposition 2 : grand format deux colonnes ──────────────────────
 
 def _render_duo(draw, pal: Palette, stats: dict, options: list, now_text: str):
-    """Deux colonnes, valeurs principales en très grand (f76).
+    """Deux colonnes, valeurs principales XL, secondaires LISIBLES.
+
+    Refonte lisibilité (retour terrain Kraken Z53, dalle 640×640 très dense) :
+    tout est ramené au plancher ``MIN_READABLE_SIZE`` (f22). Les éléments qui
+    ne passaient pas le plancher ont été **supprimés** plutôt que réduits :
+
+    - la légende « charge 7 % » (f15) et la ligne « échelle 20–50 °C » (f15) ;
+    - les sous-valeurs « 17.8 GB / 31.2 GB » (f15) : RAM/VRAM s'affichent
+      désormais en **grand pourcentage** seul ;
+    - les disques gardent un **libellé court** (``_short_mount``) au lieu du
+      montage complet, et abandonnent la capacité au profit du pourcentage
+      seul quand la ligne complète ne tient plus dans la corde.
 
     Héros (2 emplacements) : premières métriques actives dans l'ordre
     CPU > GPU > LIQUID > RAM > VRAM (le liquide est promu si CPU/GPU est
-    désactivé). Le reste tient dans une grille 2×2 ; les disques occupent
-    une bande basse.
+    désactivé). Les secondaires tiennent dans une grille 2×2 (cellule orpheline
+    centrée) ; les disques occupent une bande basse (≤ 1 ligne).
     """
     f_title = _load_font(28)
-    f_time = _load_font(18)
-    f_hero_label = _load_font(22)
+    f_time = _load_font(MIN_READABLE_SIZE)
+    f_hero_label = _load_font(24)
     f_hero_main = _load_font(76)
-    f_hero_unit = _load_font(26)
-    f_hero_pct = _load_font(30)
-    f_sub = _load_font(18)
-    f_caption = _load_font(15)
-    f_cell_label = _load_font(20)
-    f_cell_value = _load_font(26)
-    f_cell_detail = _load_font(15)
+    f_hero_unit = _load_font(28)
+    f_hero_pct = _load_font(32)
+    f_cell_label = _load_font(MIN_READABLE_SIZE)
 
-    _draw_center(draw, CENTER[0], 98, "SYSTEM MONITOR", f_title, pal.accent)
-    _draw_center(draw, CENTER[0], 130, now_text, f_time, pal.text)
+    _draw_center(draw, CENTER[0], 94, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], 128, now_text, f_time, pal.text)
 
     heroes = hero_metrics(options)
-    # Cellules secondaires : ordre de lecture classique (liquide en dernier).
     rest = secondary_metrics(options)
-    disks = (stats.get("disks") or [])[:2] if "disks" in options else []
+    disks = (stats.get("disks") or [])[:1] if "disks" in options else []
 
     hero_x = {0: 180, 1: 460}
     for i, metric in enumerate(heroes):
         cx = CENTER[0] if len(heroes) == 1 else hero_x[i]
-        _draw_center(draw, cx, 168, _metric_label(metric), f_hero_label, pal.accent)
+        _draw_center(draw, cx, 166, _metric_label(metric),
+                     f_hero_label, pal.accent)
 
         main, unit = _hero_text(stats, metric)
         unit_font = f_hero_unit if unit == "°C" else f_hero_pct
-        _draw_combo(draw, cx, 198, main, unit, f_hero_main, unit_font, pal.text)
-
-        if metric in ("ram", "vram"):
-            _draw_center(draw, cx, 286, _fmt_pair(stats.get(metric)), f_sub, pal.text)
+        _draw_combo(draw, cx, 196, main, unit, f_hero_main, unit_font, pal.text)
 
         gauge_p = _gauge_percent(stats, metric)
         if gauge_p is not None:
-            _draw_gauge(draw, cx - 110, 306, 220, 14, gauge_p, pal)
-        if metric == "cpu" and stats.get("cpu_percent") is not None:
-            _draw_center(draw, cx, 326,
-                         f"charge {stats['cpu_percent']:.0f} %", f_caption, pal.text)
-        elif metric == "liquid":
-            _draw_center(draw, cx, 326, "échelle 20–50 °C", f_caption, pal.text)
+            _draw_gauge(draw, cx - 105, 302, 210, 16, gauge_p, pal)
 
     # Séparateur
-    draw.line([(160, 352), (480, 352)], fill=pal.gauge_bg, width=2)
+    draw.line([(150, 338), (490, 338)], fill=pal.gauge_bg, width=2)
 
-    # Grille secondaire 2×2 (cellule orpheline centrée)
-    cols = [(76, 234), (330, 234)]
-    rows = [362, 432]
+    # Grille secondaire : grand pourcentage, aucune sous-valeur.
+    cols = [(76, 232), (332, 232)]
+    rows = [360, 434]
     asc_label = f_cell_label.getmetrics()[0]
-    asc_value = f_cell_value.getmetrics()[0]
     for idx, metric in enumerate(rest[:4]):
         col, row = idx % 2, idx // 2
-        orphan = (idx == len(rest) - 1 and len(rest) % 2 == 1)
-        if orphan:
-            col = None
+        if idx == len(rest) - 1 and len(rest) % 2 == 1:
+            col = None  # cellule orpheline → centrée
         x, w = cols[col if col is not None else 0]
         if col is None:
             x = CENTER[0] - w / 2
         yy = rows[row]
-        draw.text((x, yy), _metric_label(metric), font=f_cell_label, fill=pal.text)
-        if metric in ("cpu", "gpu"):
-            value = _fmt_temp(stats.get(f"{metric}_temp"))
-        elif metric == "liquid":
-            value = _fmt_temp_dec(stats.get("liquid_temp"))
-        else:
-            p = _pct_of(stats, metric)
-            value = "—" if p is None else f"{p:.0f} %"
-        _draw_right(draw, x + w, yy + asc_label - asc_value, value,
-                    f_cell_value, pal.text)
-        _draw_gauge(draw, x, yy + 28, w, 12, _gauge_percent(stats, metric), pal)
-        if metric in ("ram", "vram"):
-            draw.text((x, yy + 44), _fmt_pair(stats.get(metric)),
-                      font=f_cell_detail, fill=pal.text)
-        elif metric == "liquid":
-            draw.text((x, yy + 44), "échelle 20–50 °C",
-                      font=f_cell_detail, fill=pal.text)
+        label = _metric_label(metric)
+        value = _cell_value_text(stats, metric)
+        draw.text((x, yy), label, font=f_cell_label, fill=pal.text)
+        vfont = _fit_cell_font(draw, label, value, w, f_cell_label)
+        _draw_right(draw, x + w, yy + asc_label - vfont.getmetrics()[0],
+                    value, vfont, pal.text)
+        _draw_gauge(draw, x, yy + 46, w, 12, _gauge_percent(stats, metric), pal)
 
-    # Bande disques
-    dy = 506
+    # Bande disques (libellé court, f22) : corde bornée au bas du texte ;
+    # si la ligne complète « 562.6 GB / 931.2 GB (61%) » ne tient plus, la
+    # forme compacte « ballistix  61% » est dessinée — jamais de police
+    # sous le plancher.
+    f_disk = _load_font(MIN_READABLE_SIZE)
+    disk_h = _text_height(f_disk)
+    dy = 504
     for d in disks:
-        _draw_disk_line(draw, CENTER[0], dy, d, pal, size=16)
-        dy += 22
+        limit = min(_get_row_width(dy),
+                    _get_row_width(dy + disk_h)) - 4
+        _draw_disk_line(draw, CENTER[0], dy, d, pal, size=MIN_READABLE_SIZE,
+                        max_width=limit)
+        dy += 24
 
 
 # ── Disposition 3 : anneaux de progression ──────────────────────────
@@ -800,13 +913,17 @@ def _render_rings(draw, pal: Palette, stats: dict, options: list, now_text: str)
     Les 4 premières métriques actives (ordre CPU, GPU, RAM, VRAM, LIQUID)
     occupent les emplacements ; la 5ᵉ (le liquide en pratique) et les
     disques s'affichent en pied de cercle.
+
+    Refonte lisibilité : le libellé passe de f17 à ``MIN_READABLE_SIZE`` et
+    les sous-valeurs f14 (« charge 42% », « 9.3 GB/16.0 GB ») sont supprimées
+    — sous le plancher, elles n'étaient que du bruit. Les disques du pied
+    n'affichent plus que libellé court + pourcentage (``compact``).
     """
     f_title = _load_font(26)
-    f_time = _load_font(18)
-    f_label = _load_font(17)
+    f_time = _load_font(MIN_READABLE_SIZE)
+    f_label = _load_font(MIN_READABLE_SIZE)
     f_main = _load_font(36)
-    f_unit = _load_font(20)
-    f_sub = _load_font(14)
+    f_unit = _load_font(MIN_READABLE_SIZE)
 
     _draw_center(draw, CENTER[0], 96, "SYSTEM MONITOR", f_title, pal.accent)
     _draw_center(draw, CENTER[0], 126, now_text, f_time, pal.text)
@@ -824,29 +941,29 @@ def _render_rings(draw, pal: Palette, stats: dict, options: list, now_text: str)
         main, unit = _hero_text(stats, metric)
         _draw_combo(draw, cx, cy - 14, main, unit, f_main, f_unit, pal.text)
 
-        sub = None
-        if metric == "cpu" and stats.get("cpu_percent") is not None:
-            sub = f"charge {stats['cpu_percent']:.0f} %"
-        elif metric in ("ram", "vram"):
-            sub = _fmt_pair(stats.get(metric)).replace(" / ", "/")
-        if sub:
-            _draw_center(draw, cx, cy + 28, sub, f_sub, pal.text)
-
     # Pied de cercle : liquide (si pas d'anneau) puis disques en texte.
     footer_y = 524
+    f_footer = _load_font(MIN_READABLE_SIZE)
+    footer_h = _text_height(f_footer)
     if "liquid" in overflow and stats.get("liquid_temp") is not None:
-        _draw_center(draw, CENTER[0], footer_y,
-                     f"Liquid Temperature: {stats['liquid_temp']:.1f}°C",
-                     _load_font(20), pal.accent)
-        footer_y = 550
+        text = f"Liquid Temperature: {stats['liquid_temp']:.1f}°C"
+        limit = min(_get_row_width(footer_y),
+                    _get_row_width(footer_y + footer_h)) - 4
+        if _text_len(draw, text, f_footer) <= limit:
+            _draw_center(draw, CENTER[0], footer_y, text, f_footer, pal.accent)
+            footer_y = 550
     if "disks" in options:
         for d in (stats.get("disks") or [])[:2]:
-            # Garde-fou : ne pas dessiner une ligne disque dont le bas
-            # sortirait du cercle sûr (cas 2 disques + liquide en pied).
-            if _get_row_width(footer_y + 24) < 280:
+            # Compacité imposée par la place restante dans le cercle : on
+            # s'arrête dès que la ligne suivante n'y tiendrait plus (largeur
+            # compacte MESURÉE, jamais de police réduite sous le plancher).
+            limit = min(_get_row_width(footer_y),
+                        _get_row_width(footer_y + footer_h)) - 4
+            if _disk_line_width(draw, d, MIN_READABLE_SIZE, compact=True) > limit:
                 break
-            _draw_disk_line(draw, CENTER[0], footer_y, d, pal, size=16)
-            footer_y += 22
+            _draw_disk_line(draw, CENTER[0], footer_y, d, pal,
+                            size=MIN_READABLE_SIZE, compact=True)
+            footer_y += 24
 
 
 # Dispatch disposition → fonction de rendu.
@@ -915,21 +1032,40 @@ def render_monitoring_image(stats: dict, output_path: str,
         return False
 
 
+_OUTSIDE_MASK_CACHE = {}
+
+
+def _outside_safe_mask(width: int, height: int, tol: int):
+    """Masque binaire « hors du cercle sûr » (construit une fois par taille)."""
+    key = (width, height, tol, SAFE_RADIUS, CENTER)
+    mask = _OUTSIDE_MASK_CACHE.get(key)
+    if mask is None:
+        mask = Image.new("L", (width, height), 0)
+        px = mask.load()
+        limit = SAFE_RADIUS ** 2 + tol
+        for yy in range(height):
+            dy2 = (yy - CENTER[1]) ** 2
+            for xx in range(width):
+                if (xx - CENTER[0]) ** 2 + dy2 > limit:
+                    px[xx, yy] = 255
+        _OUTSIDE_MASK_CACHE[key] = mask
+    return mask
+
+
 def count_pixels_outside_safe(img, palette: Palette, tol: int = 16) -> int:
     """Compte les pixels non-fond au-delà du cercle sûr (rayon 300).
 
     ``tol`` absorbe l'antialiasing des bords (idem prototype de faisabilité).
+    Décompte strictement identique au parcours pixel par pixel, mais vectorisé
+    (PIL) : assez rapide pour un contrôle exhaustif de milliers de rendus.
     """
-    px = img.load()
-    limit = SAFE_RADIUS ** 2 + tol
-    bad = 0
-    width, height = img.size
-    for yy in range(height):
-        for xx in range(width):
-            dx, dy = xx - CENTER[0], yy - CENTER[1]
-            if dx * dx + dy * dy > limit and px[xx, yy] != palette.bg:
-                bad += 1
-    return bad
+    img = img.convert("RGB")
+    diff = ImageChops.difference(img, Image.new("RGB", img.size, palette.bg))
+    red, green, blue = diff.split()
+    nonzero = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    nonzero = nonzero.point(lambda v: 255 if v > 0 else 0)
+    mask = _outside_safe_mask(img.size[0], img.size[1], tol)
+    return sum(ImageChops.multiply(nonzero, mask).histogram()[1:])
 
 
 # ── Vignettes (galerie web) ─────────────────────────────────────────
