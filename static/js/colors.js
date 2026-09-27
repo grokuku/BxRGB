@@ -215,6 +215,9 @@ function initColorControls(state, sendWS, toast) {
     const level = parseInt(brightnessSlider.value, 10);
     brightnessValue.textContent = level;
     state.brightness = level;
+    // Propage le changement (compteur « modifications non enregistrées »,
+    // synchronisation des affichages) — y compris pour une barrette unique.
+    state.emit('brightness');
 
     if (state.selected_stick) {
       sendWS({

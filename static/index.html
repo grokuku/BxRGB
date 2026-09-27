@@ -210,9 +210,15 @@
             <button class="btn" id="kraken-btn-stop-display" disabled>⏹ Arrêter</button>
           </div>
           <div class="slider-row">
-            <label>Intervalle d'actualisation <b id="kraken-interval-value">10s</b></label>
-            <input type="range" id="kraken-interval" min="5" max="60" step="5" value="10">
+            <label>Fréquence d'actualisation <b id="kraken-interval-value">une image toutes les 10 s</b></label>
+            <input type="range" id="kraken-interval" min="2" max="60" step="1" value="10">
           </div>
+          <label class="kraken-asap">
+            <input type="checkbox" id="kraken-interval-asap">
+            ⚡ Le plus souvent possible
+          </label>
+          <div class="hint" style="margin-top:4px;">Un subprocess <code>liquidctl</code> par image :
+            la cadence réelle ne dépasse pas ~1 image / 2-3 s.</div>
         </div>
 
         <div class="card">
@@ -256,13 +262,16 @@
           <div class="card-head">
             <span class="card-title">📊 Monitoring — configuration</span>
             <span class="card-head-tools">
+              <span class="badge" id="theme-count">3 thèmes</span>
               <span class="badge">Thème : <b id="theme-key">data_center</b></span>
               <button class="btn btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
             </span>
           </div>
 
-          <!-- Galerie visuelle des 3 thèmes RÉELS d'écran LCD (ballistix/monitor.py),
-               sélection injectée dans l'état par js/app.js (remplace l'ancien dropdown) -->
+          <!-- Galerie des thèmes d'écran LCD : liste servie par
+               GET /api/kraken/themes (dérivée de ballistix/monitor.py) et
+               vignettes PNG générées par le VRAI moteur de rendu PIL ;
+               squelette CSS au chargement / repli hors-ligne. -->
           <div class="theme-gallery" id="theme-gallery" role="radiogroup" aria-label="Thème visuel de l'écran LCD"></div>
 
           <div class="hint" style="margin-top:12px;">Capteurs à afficher</div>
@@ -272,8 +281,7 @@
             <label><input type="checkbox" id="kraken-ram" checked> 💾 Mémoire RAM</label>
             <label><input type="checkbox" id="kraken-vram" checked> 🎮 Mémoire GPU</label>
             <label><input type="checkbox" id="kraken-disks" checked> 💿 Disques</label>
-            <label><input type="checkbox" id="kraken-liquid-temp" checked> 🌡 Température liquide</label>
-          </div>
+            <label><input type="checkbox" id="kraken-liquid-temp" checked> 🌡 Température liquide</label>          </div>
 
           <div class="preview-wrap">
             <div class="preview-frame">
@@ -305,9 +313,18 @@
   <!-- ════════════════════════ FOOTER ═══════════════════════ -->
   <footer class="app-footer">
     <button class="btn btn-danger" id="btn-reset-all">🔴 Reset All (éteindre)</button>
-    <button class="btn" id="btn-sync">🔄 Sync</button>
     <span class="footer-note">Ballistix RGB Controller · thème <code>holaf-tokens</code> v0.3.0 ·
       preset actif : <b id="footer-pack">bxrgb-neon</b> · couleur des LEDs indépendante du thème</span>
+
+    <!-- Barre Save/Cancel : le badge compte les écarts avec la RÉFÉRENCE
+         persistée (GET /api/saved). Boutons réellement disabled au repos. -->
+    <div class="save-bar" id="save-bar">
+      <span class="dirty-badge" id="dirty-badge" aria-live="polite" hidden></span>
+      <button class="btn" id="btn-cancel" disabled
+              title="Ré-applique au matériel la dernière configuration enregistrée">↩ Annuler</button>
+      <button class="btn btn-primary" id="btn-save" disabled
+              title="Fige l'état courant comme nouvelle référence (config.json)">💾 Enregistrer</button>
+    </div>
   </footer>
 
   <!-- ════════════════════════ SCRIPTS ═══════════════════════ -->

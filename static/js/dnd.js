@@ -112,13 +112,10 @@ function initDnD(state, onLedClick) {
         const stick = state.sticks.splice(fromIdx, 1)[0];
         state.sticks.splice(toIdx, 0, stick);
 
-        // Re-rendre le canvas et le DnD
+        // Re-rendre le canvas et le DnD. La persistance de l'ordre passe
+        // désormais par le flux dirty → bouton « Enregistrer » (POST /api/save)
+        // côté app.js : plus d'écriture automatique ici.
         state.notify();
-
-        // Persister l'ordre dans la configuration (apiFetch global, app.js)
-        apiFetch('/colors/save', { method: 'POST' })
-          .then(() => console.log('✅ Ordre des sticks sauvegardé'))
-          .catch(err => console.warn('⚠ Erreur sauvegarde ordre:', err));
       });
 
       // ── Clic sur une LED individuelle (via le canvas) ──

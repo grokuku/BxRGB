@@ -678,38 +678,77 @@ input[type="range"]:disabled::-webkit-slider-thumb { background: var(--brd); bor
 .sensors label:hover { border-color: var(--brd); color: var(--text); background: var(--chip-bg); }
 .sensors input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 
-/* ── Kraken : galerie de vignettes des thèmes LCD ───────── */
-.theme-gallery { --lcd: 150px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+/* ── Kraken : option de fréquence « le plus souvent possible » ── */
+.kraken-asap {
+  display: flex; align-items: center; gap: 7px; margin-top: 9px;
+  font-size: 12px; color: var(--dim); cursor: pointer;
+  padding: 5px 8px; border-radius: 8px; border: 1px solid transparent;
+  transition: border-color .16s, color .16s, background .16s;
+}
+.kraken-asap:hover { border-color: var(--brd); color: var(--text); background: var(--chip-bg); }
+.kraken-asap input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+#kraken-interval:disabled { opacity: .45; }
+
+/* ── Kraken : galerie de vignettes des thèmes LCD ─────────
+   Grille compacte + scroll interne plafonné : la galerie peut grandir
+   (beaucoup de thèmes) sans pousser la page. Les vignettes sont des PNG
+   du VRAI moteur de rendu PIL servis par /api/kraken/themes/{key}/thumb.png. */
+.theme-gallery {
+  --lcd: 96px;
+  display: grid;
+  /* 104px (et non 92) : à 1440 px la colonne fait 608 px → 5 colonnes de
+     ~112 px, vignette affichée à 96 px (minmax(92px) donnait 6 colonnes
+     de 78 px, sous la cible « vignette ≈ 96 px »). */
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 9px;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;      /* le scroll interne ne propage pas à la page */
+  padding: 2px 8px 2px 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--brd) transparent;
+}
+.theme-gallery::-webkit-scrollbar { width: 8px; }
+.theme-gallery::-webkit-scrollbar-track { background: transparent; }
+.theme-gallery::-webkit-scrollbar-thumb { background: var(--brd); border-radius: 999px; }
+.theme-gallery::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 .theme-card {
   position: relative; font: inherit; text-align: left; cursor: pointer;
-  padding: 9px; border-radius: 14px;
+  padding: 6px; border-radius: 12px; min-width: 0;
   border: 1px solid var(--brd); background: var(--panel-2);
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  transition: border-color .18s, box-shadow .18s, transform .18s;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  transition: border-color .18s, box-shadow .18s;
   --tc: var(--accent);
 }
 .theme-card[data-theme="data_center"] { --tc: #00a0ff; }
 .theme-card[data-theme="overclock"] { --tc: #ff2828; }
 .theme-card[data-theme="fluid_flow"] { --tc: #78d2ff; }
-.theme-card:hover { transform: translateY(-3px); border-color: var(--tc); box-shadow: 0 0 22px -4px var(--tc); }
-.theme-card.selected { border-color: var(--tc); box-shadow: 0 0 0 1px var(--tc), 0 0 26px -2px var(--tc); }
+.theme-card:hover { border-color: var(--tc); box-shadow: 0 0 16px -4px var(--tc); }
+.theme-card.selected { border-color: var(--tc); box-shadow: 0 0 0 1px var(--tc), 0 0 20px -2px var(--tc); }
 .theme-badge {
-  position: absolute; top: 8px; right: 8px; display: none;
-  font-family: var(--mono); font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
-  padding: 3px 7px; border-radius: 999px; background: var(--tc); color: #03060c; font-weight: 700;
+  position: absolute; top: 4px; right: 4px; display: none; z-index: 1;
+  font-family: var(--mono); font-size: 8px; letter-spacing: .5px; text-transform: uppercase;
+  padding: 2px 5px; border-radius: 999px; background: var(--tc); color: #03060c; font-weight: 700;
 }
 .theme-card.selected .theme-badge { display: block; }
 .theme-led {
-  position: absolute; top: 9px; left: 9px; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--tc); box-shadow: 0 0 9px var(--tc); opacity: .5;
+  position: absolute; top: 6px; left: 6px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--tc); box-shadow: 0 0 9px var(--tc); opacity: .5; z-index: 1;
 }
 .theme-card.selected .theme-led { opacity: 1; }
-.theme-check { display: none; position: absolute; top: 8px; left: 22px; color: var(--tc); font-weight: 700; }
+.theme-check { display: none; position: absolute; top: 5px; left: 16px; color: var(--tc); font-weight: 700; z-index: 1; }
 .theme-card.selected .theme-check { display: block; }
-.theme-visual { min-width: 0; }
-.theme-info { width: 100%; text-align: center; }
-.theme-name { display: block; font-size: 12.5px; font-weight: 700; }
-.theme-sub { display: block; font-size: 10.5px; color: var(--faint); }
+.theme-visual { width: 100%; display: flex; justify-content: center; }
+.theme-thumb {
+  display: block; width: 100%; max-width: var(--lcd); height: auto;
+  aspect-ratio: 1 / 1; border-radius: 50%; object-fit: cover;
+  background: #05080c; border: 1px solid rgba(128, 128, 128, .25);
+}
+.theme-info { width: 100%; text-align: center; min-width: 0; }
+.theme-name {
+  display: block; font-size: 10.5px; font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ── Écran LCD simulé (rendu fidèle au PIL 640×640) ─────── */
 .lcd {
@@ -785,6 +824,19 @@ input[type="range"]:disabled::-webkit-slider-thumb { background: var(--brd); bor
 .footer-note b { color: var(--dim); }
 .footer-note code { font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
 
+/* ── Barre Enregistrer / Annuler (modifications non enregistrées) ─── */
+.save-bar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.dirty-badge {
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  color: var(--warn); background: rgba(255, 176, 32, .12);
+  border: 1px solid rgba(255, 176, 32, .38);
+  padding: 4px 10px; border-radius: 999px;
+}
+.dirty-badge[hidden] { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .save-bar .btn { transition: opacity .15s ease, border-color .15s ease, background-color .15s ease; }
+}
+
 /* ── Transition douce au changement de pack (~150 ms) ───── */
 html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
   transition: background-color .15s ease, border-color .15s ease, color .15s ease,
@@ -813,6 +865,7 @@ html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *
   .tab-panel { padding: 12px 14px 18px; }
   .app-footer { padding: 10px 14px; flex-wrap: wrap; }
   .footer-note { margin-left: 0; text-align: left; }
+  .save-bar { margin-left: auto; }
 }
 @media (max-width: 600px) {
   .dnd-container { grid-template-columns: repeat(2, 1fr); }

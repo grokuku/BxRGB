@@ -22,6 +22,10 @@ ballistix_scanall_*.txt
 # Config locale (ne pas committer la config utilisateur)
 # ~/.config/ballistix/ est hors du repo de toute façon
 
+# Harnais front : sorties générées
+tests/front/out/
+tests/front/screenshots/
+
 # OS
 .DS_Store
 Thumbs.db

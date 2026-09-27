@@ -7,6 +7,7 @@ dans ~/.config/ballistix/config.json (format JSON).
 La configuration survit aux redémarrages du service.
 """
 
+import copy
 import json
 import os
 import shutil
@@ -19,8 +20,13 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 BACKUP_DIR = CONFIG_DIR / "backups"
 MAX_BACKUPS = 5
 
+# ── Référence persistée (sémantique Save / Cancel) ───────────────────
+# config.json représente la RÉFÉRENCE : le dernier état figé par
+# « Enregistrer » (POST /api/save). Les modifications appliquées au
+# matériel en temps réel ne touchent JAMAIS ce fichier tant qu'un Save
+# n'a pas été demandé.
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 2,
+    "version": 3,
     "metadata": {
         "created": None,  # Set on first save
         "updated": None,  # Set on each save
@@ -35,6 +41,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "speed": 1.0,
         "framerate": 30,
+        "refresh": 20,   # taux d'écriture SMBus en animation (Hz)
+    },
+    # Réglages Kraken (aucun readback liquidctl : l'état de référence est
+    # ici, l'état « courant » vit en mémoire dans ballistix/kraken.py).
+    "kraken": {
+        "lcd": {
+            "brightness": 80,     # 0-100
+            "orientation": 0,      # 0/90/180/270
+            "mode": "liquid",      # mode d'écran (liquid)
+        },
+        "display": {
+            "mode": None,          # None | "monitor" | "gallery" (thread actif)
+            "theme": "data_center",  # data_center | overclock | fluid_flow
+            "options": ["cpu", "gpu", "ram", "vram", "disks", "liquid"],
+            "interval": 10.0,      # secondes entre deux mises à jour (ou "asap")
+        },
     },
     "ui": {
         "orientation": "vertical",
@@ -71,7 +93,7 @@ def load() -> dict:
     """
     ensure_dirs()
     if not CONFIG_FILE.exists():
-        config = dict(DEFAULT_CONFIG)
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["metadata"]["created"] = datetime.now().isoformat()
         return config
 
@@ -80,25 +102,38 @@ def load() -> dict:
             config = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         print(f"⚠ Erreur lecture config: {e}")
-        config = dict(DEFAULT_CONFIG)
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["metadata"]["created"] = datetime.now().isoformat()
         return config
 
     # Fusionner avec les clés par défaut (pour conserver les nouvelles clés
-    # introduites dans des versions ultérieures du schéma).
-    merged = dict(DEFAULT_CONFIG)
-    merged.update(config)
+    # introduites dans des versions ultérieures du schéma). La copie est
+    # profonde : DEFAULT_CONFIG ne doit jamais être muté par un appelant.
+    merged = copy.deepcopy(DEFAULT_CONFIG)
+    _merge_into(merged, config)
 
-    # Fusion récursive pour les sous-dictionnaires (ui, animation, metadata)
-    for key in ("metadata", "animation", "ui"):
-        if key in config and isinstance(config[key], dict):
-            merged[key].update(config[key])
-
-    # S'assurer que manual_devices est une liste
+    # Garantir les types des collections (le fichier peut être ancien/corrompu)
     if not isinstance(merged.get("manual_devices"), list):
         merged["manual_devices"] = []
+    if not isinstance(merged.get("colors"), dict):
+        merged["colors"] = {}
+    if not isinstance(merged.get("stick_order"), list):
+        merged["stick_order"] = []
 
     return merged
+
+
+def _merge_into(target: dict, override: dict) -> None:
+    """Fusionne récursivement ``override`` dans ``target`` (en place).
+
+    Les dictionnaires sont fusionnés clé par clé ; toute autre valeur
+    (liste, scalaire, None) remplace la valeur cible par une copie.
+    """
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_into(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
 
 
 def save(config: dict) -> None:
@@ -205,6 +240,35 @@ def save_brightness(level: int) -> None:
     save(config)
 
 
+def save_stick_order(order: List[str]) -> None:
+    """Sauvegarde l'ordre des sticks (liste de ``"bus:0xaddr"``)."""
+    config = load()
+    config["stick_order"] = [str(item) for item in order]
+    save(config)
+
+
+def save_animation(settings: dict) -> None:
+    """Sauvegarde la section ``animation`` (speed/framerate/refresh…)."""
+    config = load()
+    merged = dict(config.get("animation") or {})
+    merged.update(settings)
+    config["animation"] = merged
+    save(config)
+
+
+def save_kraken(settings: dict) -> None:
+    """Sauvegarde la section ``kraken`` (lcd/display), fusion partielle."""
+    config = load()
+    current = config.get("kraken") or {}
+    for section in ("lcd", "display"):
+        if isinstance(settings.get(section), dict):
+            merged = dict(current.get(section) or {})
+            merged.update(settings[section])
+            current[section] = merged
+    config["kraken"] = current
+    save(config)
+
+
 def save_ui_prefs(orientation: Optional[str] = None,
                   theme: Optional[str] = None) -> None:
     """Sauvegarde les préférences de l'interface utilisateur.
@@ -242,6 +306,9 @@ __all__ = [
     "remove_manual_device",
     "save_colors",
     "save_brightness",
+    "save_stick_order",
+    "save_animation",
+    "save_kraken",
     "save_ui_prefs",
     "get_config_path",
 ]

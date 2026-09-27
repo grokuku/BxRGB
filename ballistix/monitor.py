@@ -16,6 +16,8 @@ proprement un flag `ok: False` sans crasher le serveur.
 
 import os
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 
 # ── Dépendances optionnelles ────────────────────────────────────────
@@ -45,13 +47,17 @@ SAFE_RADIUS = 300                # Zone où le texte est visible
 # ── Thèmes ──────────────────────────────────────────────────────
 
 class Theme:
-    def __init__(self, bg, text, accent, gauge_bg, gauge_start, gauge_end):
+    def __init__(self, bg, text, accent, gauge_bg, gauge_start, gauge_end,
+                 label=None, subtitle=None):
         self.bg = bg
         self.text = text
         self.accent = accent
         self.gauge_bg = gauge_bg
         self.gauge_start = gauge_start
         self.gauge_end = gauge_end
+        # Métadonnées exposées par l'API (galerie web) : libellé + sous-titre.
+        self.label = label
+        self.subtitle = subtitle
 
 THEMES = {
     "overclock": Theme(
@@ -61,6 +67,8 @@ THEMES = {
         gauge_bg=(45, 10, 10),
         gauge_start=(150, 0, 0),
         gauge_end=(255, 40, 40),
+        label="Overclock",
+        subtitle="Rouge Agressif",
     ),
     "data_center": Theme(
         bg=(5, 15, 25),
@@ -69,6 +77,8 @@ THEMES = {
         gauge_bg=(10, 30, 50),
         gauge_start=(0, 60, 120),
         gauge_end=(0, 180, 255),
+        label="Data Center",
+        subtitle="Bleu Technique",
     ),
     "fluid_flow": Theme(
         bg=(25, 35, 45),
@@ -77,8 +87,35 @@ THEMES = {
         gauge_bg=(50, 70, 90),
         gauge_start=(160, 210, 255),
         gauge_end=(200, 230, 255),
+        label="Fluid Flow",
+        subtitle="Bleu Pastel",
     ),
 }
+
+# Thème par défaut (celui du mode monitoring).
+DEFAULT_THEME = "data_center"
+
+
+def list_themes() -> list:
+    """Liste ordonnée des thèmes d'écran pour l'API (défaut en tête).
+
+    Chaque entrée : ``{key, label, subtitle, default}``. C'est la source
+    unique : ajouter un thème à THEMES suffit pour qu'il apparaisse dans
+    la galerie web (vignette comprise, sans toucher au front).
+    """
+    def entry(key, theme):
+        return {
+            "key": key,
+            "label": theme.label or key.replace("_", " ").title(),
+            "subtitle": theme.subtitle or "",
+            "default": key == DEFAULT_THEME,
+        }
+
+    ordered = []
+    if DEFAULT_THEME in THEMES:
+        ordered.append((DEFAULT_THEME, THEMES[DEFAULT_THEME]))
+    ordered.extend((k, t) for k, t in THEMES.items() if k != DEFAULT_THEME)
+    return [entry(k, t) for k, t in ordered]
 
 # ── Collecte des stats ──────────────────────────────────────────────
 
@@ -291,21 +328,23 @@ def _fmt_bytes(n) -> str:
     return "—"
 
 
-def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "data_center", options: list = None) -> bool:
+def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "data_center", options: list = None, now=None) -> bool:
     """Génère l'image 640×640 de monitoring adaptée au cercle.
 
     Args:
         stats: Dictionnaire des stats système.
         output_path: Chemin de sauvegarde.
         theme_name: Clé dans THEMES.
-        options: Liste des stats à afficher (ex: ['cpu', 'gpu', 'ram', 'vram', 'disks']).
+        options: Liste des stats à afficher (ex: ['cpu', 'gpu', 'liquid']).
+        now: Heure à afficher (datetime/chaîne). None = heure courante ;
+            une valeur figée rend le PNG reproductible (vignettes en cache).
     """
     if not PIL_AVAILABLE:
         return False
 
     theme = THEMES.get(theme_name, THEMES["data_center"])
     if options is None:
-        options = ["cpu", "gpu", "ram", "vram", "disks"]
+        options = ["cpu", "gpu", "ram", "vram", "disks", "liquid"]
 
     img = Image.new("RGB", SCREEN_SIZE, theme.bg)
     draw = ImageDraw.Draw(img)
@@ -321,10 +360,14 @@ def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "da
     tw = draw.textlength(title_text, font=font_title)
     draw.text((CENTER[0] - tw // 2, y), title_text, fill=theme.accent, font=font_title)
     
-    import time
-    now = time.strftime("%H:%M:%S")
-    ntw = draw.textlength(now, font=font_small)
-    draw.text((CENTER[0] + ntw // 2, y + 35), now, fill=theme.text, font=font_small)
+    if now is None:
+        now_text = time.strftime("%H:%M:%S")
+    elif hasattr(now, "strftime"):
+        now_text = now.strftime("%H:%M:%S")
+    else:
+        now_text = str(now)
+    ntw = draw.textlength(now_text, font=font_small)
+    draw.text((CENTER[0] - ntw // 2, y + 35), now_text, fill=theme.text, font=font_small)
     
     y += 60
 
@@ -383,21 +426,80 @@ def render_monitoring_image(stats: dict, output_path: str, theme_name: str = "da
             dstr = f"{_fmt_bytes(d.get('used'))} / {_fmt_bytes(d.get('total'))}"
             add_row(mount, dstr, d.get("percent"), "💿")
 
-    # ── Température Liquide (toujours en bas si dispo) ──
-    liquid = stats.get("liquid_temp")
-    if liquid is not None:
-        y_liq = 500
-        width_liq = _get_row_width(y_liq)
-        if width_liq > 100:
-            txt = f"Liquid Temperature: {liquid:.1f}°C"
-            tw_liq = draw.textlength(txt, font=font_small)
-            draw.text((CENTER[0] - tw_liq // 2, y_liq), txt, fill=theme.accent, font=font_small)
+    # ── Température Liquide (uniquement si l'option est active) ──
+    if "liquid" in options:
+        liquid = stats.get("liquid_temp")
+        if liquid is not None:
+            y_liq = 500
+            width_liq = _get_row_width(y_liq)
+            if width_liq > 100:
+                txt = f"Liquid Temperature: {liquid:.1f}°C"
+                tw_liq = draw.textlength(txt, font=font_small)
+                draw.text((CENTER[0] - tw_liq // 2, y_liq), txt, fill=theme.accent, font=font_small)
 
     try:
         img.save(output_path, "PNG")
         return True
     except Exception:
         return False
+
+
+# ── Vignettes des thèmes (galerie web) ──────────────────────────────
+
+THUMB_SIZE = 150       # Taille (px) des vignettes servies par l'API
+# Heure FIGÉE des vignettes : rendu déterministe → cache disque réutilisable.
+THUMB_NOW = datetime(2024, 1, 1, 14, 32, 7)
+
+# Stats d'exemple réalistes (et déterministes) des vignettes.
+THEME_SAMPLE_STATS = {
+    "cpu_temp": 48.0,
+    "gpu_temp": 51.0,
+    "cpu_percent": 42.0,
+    "ram": {"used": 9.3 * 1024**3, "total": 16.0 * 1024**3, "percent": 58.0},
+    "vram": {"used": 3.5 * 1024**3, "total": 8.0 * 1024**3, "percent": 44.0},
+    "disks": [{
+        "mount": "/",
+        "used": 412.0 * 1024**3,
+        "total": 1000.0 * 1024**3,
+        "percent": 41.0,
+    }],
+    "liquid_temp": 32.4,
+}
+
+
+def render_theme_thumbnail(theme_key: str, output_path: str, size: int = THUMB_SIZE) -> bool:
+    """Génère la vignette d'un thème avec le VRAI moteur de rendu.
+
+    Rendu 640×640 déterministe (stats d'exemple + heure figée THUMB_NOW)
+    puis réduction LANCZOS vers ``size`` px : mêmes polices, mêmes
+    positions et mêmes jauges que l'aperçu. Retourne False si Pillow est
+    indisponible ou si le thème est inconnu.
+    """
+    if not PIL_AVAILABLE or theme_key not in THEMES:
+        return False
+    import tempfile
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="bxrgb_theme_thumb_")
+        os.close(fd)
+        if not render_monitoring_image(
+            THEME_SAMPLE_STATS, tmp, theme_key, now=THUMB_NOW
+        ):
+            return False
+        with Image.open(tmp) as full:
+            thumb = full.convert("RGB").resize(
+                (size, size), Image.Resampling.LANCZOS
+            )
+            thumb.save(output_path, "PNG")
+        return True
+    except Exception:
+        return False
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # ── Compatibilité ───────────────────────────────────────────────────

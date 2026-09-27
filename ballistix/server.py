@@ -22,7 +22,7 @@ import threading
 import urllib.request
 import urllib.error
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -37,7 +37,11 @@ from .kraken import (
     kraken_save_image, kraken_decode_b64,
     kraken_gallery_list, kraken_gallery_add, kraken_gallery_delete,
     kraken_gallery_start, kraken_monitor_start, kraken_stop_display,
-    kraken_monitor_preview, _display_thread_status,
+    kraken_monitor_preview,
+    kraken_theme_thumb, kraken_purge_thumbs,
+    kraken_get_settings, kraken_update_settings, kraken_display_status,
+    kraken_display_reconfigure, kraken_pending_changes,
+    kraken_commit_file_changes, kraken_restore_file_changes,
 )
 
 # ── Version du daemon (pour l'auto-update) ───────────────────
@@ -56,6 +60,78 @@ class ColorsBody(BaseModel):
 class BrightnessBody(BaseModel):
     """Niveau de luminosité 0-255."""
     level: int
+
+
+class SaveBody(BaseModel):
+    """État client optionnel joint à POST /api/save.
+
+    Le réordonnancement drag&drop vit côté front ; ``stick_order``
+    (liste de ``"bus:0xaddr"``) permet de l'appliquer au modèle serveur
+    juste avant de figer la référence.
+    """
+    stick_order: Optional[List[str]] = None
+
+
+# ── Référence persistée (Save / Cancel) ───────────────────────
+
+def _reference_payload(config: dict) -> dict:
+    """Construit la RÉFÉRENCE exposée par GET /api/saved.
+
+    Contenu : couleurs par stick, luminosité globale, ordre des sticks,
+    réglages d'animation (speed/framerate/refresh) et section kraken
+    (lcd + display). C'est exactement ce que fige POST /api/save et ce
+    que ré-applique POST /api/restore.
+    """
+    animation = dict(config.get("animation") or {})
+    kraken_cfg = config.get("kraken") or {}
+    return {
+        "colors": {
+            str(key): [list(c) for c in value]
+            for key, value in (config.get("colors") or {}).items()
+            if isinstance(value, (list, tuple))
+        },
+        "brightness": config.get("brightness", 255),
+        "stick_order": [str(item) for item in (config.get("stick_order") or [])],
+        "animation": {
+            "speed": animation.get("speed", 1.0),
+            "framerate": animation.get("framerate", 30),
+            "refresh": animation.get("refresh", 20),
+            "enabled": animation.get("enabled", False),
+            "type": animation.get("type", "static"),
+        },
+        "kraken": {
+            "lcd": dict(kraken_cfg.get("lcd") or {}),
+            "display": dict(kraken_cfg.get("display") or {}),
+        },
+    }
+
+
+def _restore_kraken_hardware(lcd: dict, display: dict) -> None:
+    """Ré-applique la référence Kraken au matériel (best-effort).
+
+    liquidctl peut être absent (pas d'erreur fatale) : l'état mémoire est
+    aligné séparément par l'appelant.
+    """
+    try:
+        if "brightness" in lcd:
+            kraken_set_lcd_brightness(lcd["brightness"])
+        if "orientation" in lcd:
+            kraken_set_lcd_orientation(lcd["orientation"])
+        if lcd.get("mode"):
+            kraken_set_lcd_mode(lcd["mode"])
+        mode = display.get("mode")
+        if mode == "monitor":
+            kraken_monitor_start(
+                display.get("interval", 10.0),
+                theme=display.get("theme", "data_center"),
+                options=display.get("options"),
+            )
+        elif mode == "gallery":
+            kraken_gallery_start(display.get("interval", 10.0))
+        else:
+            kraken_stop_display()
+    except Exception as e:
+        print(f"⚠ Restauration Kraken (matériel) partielle : {e}")
 
 # ── Gestionnaire WebSocket ────────────────────────────────────
 
@@ -113,13 +189,31 @@ class SMBusManager:
         self._anim_engine: Optional['AnimationEngine'] = None
         self._save_timer: Optional[threading.Timer] = None
         self._smbus_refresh_rate: float = 20.0  # écritures SMBus/sec pour les animations
+        # Réglages d'animation COURANTS (mémorisés même moteur arrêté :
+        # la référence persistée les compare dans /api/saved).
+        self._anim_speed: float = 1.0
+        self._anim_framerate: int = 30
+        # Dernière luminosité connue (secours si aucun stick).
+        self._last_brightness: int = 255
 
     def set_smbus_refresh_rate(self, rate: float):
         """Définit le taux max d'écriture SMBus en animations (1-30 Hz)."""
         self._smbus_refresh_rate = max(1.0, min(30.0, float(rate)))
 
+    def animation_settings(self) -> dict:
+        """Réglages d'animation courants (speed/framerate/refresh)."""
+        return {
+            "speed": self._anim_speed,
+            "framerate": self._anim_framerate,
+            "refresh": self._smbus_refresh_rate,
+        }
+
     def _schedule_save(self):
-        """Programme une sauvegarde différée (debounced 2s)."""
+        """Programme une sauvegarde différée (debounced 2s).
+
+        ⚠ DÉPRÉCIÉ : l'auto-save a été retiré (la persistance ne se fait QUE
+        via POST /api/save). Conservé pour un usage explicite éventuel.
+        """
         if self._save_timer:
             self._save_timer.cancel()
         self._save_timer = threading.Timer(2.0, self._do_save)
@@ -127,18 +221,9 @@ class SMBusManager:
         self._save_timer.start()
 
     def _do_save(self):
-        """Sauvegarde les couleurs et l'ordre dans la config."""
+        """Sauvegarde explicite (dépréciée) — délègue à save_current()."""
         try:
-            from .config import load as load_config, save as save_config
-            config = load_config()
-            config["colors"] = {
-                f"stick_{i}": [list(c) for c in s.colors]
-                for i, s in enumerate(self._sticks)
-            }
-            config["stick_order"] = [f"{s.bus_num}:{hex(s.address)}" for s in self._sticks]
-            if self._sticks:
-                config["brightness"] = self._sticks[0].get_brightness()
-            save_config(config)
+            self.save_current()
         except Exception as e:
             print(f"⚠ Auto-save error: {e}")
 
@@ -160,12 +245,26 @@ class SMBusManager:
         et ceux persistés dans le fichier de configuration.
 
         L'ordre des sticks est restauré depuis ``config["stick_order"]``
-        (liste de strings ``"bus:0xaddr"``) puis sauvegardé après
-        réordonnancement.
+        (liste de strings ``"bus:0xaddr"``).
+
+        RÈGLE IMPORTANTE (auto-save coupé) : un re-scan ne doit PAS être un
+        Cancel implicite. Les couleurs et la luminosité COURANTES des sticks
+        déjà connus (même ``bus:0xaddr``) sont préservées ; la configuration
+        persistée n'est appliquée qu'aux sticks NOUVELLEMENT détectés.
+        L'ordre courant n'est plus persisté ici — seul POST /api/save le fait.
         """
         with self._lock:
-            from .config import load as load_config, save as save_config
+            from .config import load as load_config
             from smbus2 import SMBus
+
+            # ── 0. Mémoriser l'état courant des sticks connus ──
+            previous = {
+                f"{s.bus_num}:{hex(s.address).lower()}": {
+                    "colors": [tuple(c) for c in s.colors],
+                    "brightness": s.get_brightness(),
+                }
+                for s in self._sticks
+            }
 
             # Fermer les anciens bus
             for old in self._sticks:
@@ -211,10 +310,7 @@ class SMBusManager:
                         print(f"  ⚠ Erreur ajout manuel {bus_num}:{hex(addr)} - {e}")
 
             # ── 5. Restaurer l'ordre des sticks depuis la config ──
-            # Restaurer l'ordre depuis la config
             try:
-                from .config import load as load_config
-                config = load_config()
                 saved_order = config.get("stick_order", [])
                 if saved_order:
                     ordered = []
@@ -227,7 +323,7 @@ class SMBusManager:
                                 if s.bus_num == bus_num and s.address == addr and s not in ordered:
                                     ordered.append(s)
                                     break
-                        except:
+                        except Exception:
                             pass
                     for s in sticks:
                         if s not in ordered:
@@ -239,37 +335,47 @@ class SMBusManager:
             self._sticks = sticks
             self._bus_map = {f"stick_{i}": s for i, s in enumerate(sticks)}
 
-            # ── 6. Restaurer les couleurs depuis la config ──
+            # ── 6. Couleurs : préserver le COURANT des sticks connus,
+            #        n'appliquer la config qu'aux NOUVEAUX sticks ──
             saved_colors = config.get("colors", {})
             for i, stick in enumerate(self._sticks):
-                stick_id = f"stick_{i}"
-                if stick_id in saved_colors:
-                    for led_idx, color in enumerate(saved_colors[stick_id]):
-                        if led_idx < stick.num_leds:
-                            stick.colors[led_idx] = tuple(color)
-                # Appliquer les couleurs aux LEDs physiques
+                key = f"{stick.bus_num}:{hex(stick.address).lower()}"
+                prev = previous.get(key)
+                if prev is not None:
+                    for led_idx, color in enumerate(prev["colors"][:stick.num_leds]):
+                        stick.colors[led_idx] = tuple(color)
+                else:
+                    stick_id = f"stick_{i}"
+                    if stick_id in saved_colors:
+                        for led_idx, color in enumerate(saved_colors[stick_id]):
+                            if led_idx < stick.num_leds:
+                                stick.colors[led_idx] = tuple(color)
+                # Ré-appliquer les couleurs (préservées ou persistées) au matériel
                 try:
                     stick.send_direct_colors()
                 except Exception:
                     pass
 
-            # ── 7. Restaurer la luminosité depuis la config ──
-            try:
-                brightness = config.get("brightness", 255)
-                for stick in self._sticks:
-                    stick.set_brightness(brightness)
-            except Exception:
-                pass
+            # ── 7. Luminosité : préserver le courant des sticks connus,
+            #        appliquer la config persistée aux nouveaux ──
+            for stick in self._sticks:
+                key = f"{stick.bus_num}:{hex(stick.address).lower()}"
+                prev = previous.get(key)
+                try:
+                    stick.set_brightness(
+                        prev["brightness"] if prev is not None
+                        else config.get("brightness", 255)
+                    )
+                except Exception:
+                    pass
+            if self._sticks:
+                try:
+                    self._last_brightness = self._sticks[0].get_brightness()
+                except Exception:
+                    pass
 
-            # ── 8. Sauvegarder l'ordre actuel (après réordonnancement) ──
-            # Sauvegarder l'ordre
-            try:
-                from .config import load as load_config, save as save_config
-                config = load_config()
-                config["stick_order"] = [f"{s.bus_num}:{hex(s.address)}" for s in sticks]
-                save_config(config)
-            except Exception as e:
-                print(f"⚠ Erreur sauvegarde ordre: {e}")
+            # Note : l'ordre courant n'est PLUS persisté ici (auto-save
+            # supprimé) — il sera écrit au prochain POST /api/save.
 
             return self._get_status()
 
@@ -310,7 +416,8 @@ class SMBusManager:
                         min(255, max(0, int(b))),
                     )
             stick.send_direct_colors()
-        self._schedule_save()
+        # NOTE : plus d'auto-save ici — la persistance passe uniquement par
+        # POST /api/save (l'application au matériel reste temps réel).
         return True
 
     def set_led(self, stick_id: str, led_idx: int,
@@ -321,7 +428,6 @@ class SMBusManager:
             return False
         with self._lock:
             stick.set_led(led_idx, r, g, b)
-        self._schedule_save()
         return True
 
     def set_all_leds(self, stick_id: str, r: int, g: int, b: int) -> bool:
@@ -331,7 +437,6 @@ class SMBusManager:
             return False
         with self._lock:
             stick.set_all_leds(r, g, b)
-        self._schedule_save()
         return True
 
     def set_brightness(self, stick_id: str, level: int) -> bool:
@@ -339,9 +444,10 @@ class SMBusManager:
         stick = self.get_stick(stick_id)
         if not stick:
             return False
+        level = min(255, max(0, int(level)))
         with self._lock:
-            stick.set_brightness(min(255, max(0, int(level))))
-        self._schedule_save()
+            stick.set_brightness(level)
+        self._last_brightness = level
         return True
 
     def set_all_brightness(self, level: int):
@@ -350,7 +456,7 @@ class SMBusManager:
         with self._lock:
             for stick in self._sticks:
                 stick.set_brightness(level)
-        self._schedule_save()
+        self._last_brightness = level
 
     def apply_all(self):
         """Applique les couleurs actuelles de tous les sticks (thread-safe)."""
@@ -365,6 +471,160 @@ class SMBusManager:
                 f"stick_{i}": [list(c) for c in s.colors]
                 for i, s in enumerate(self._sticks)
             }
+
+    # ── Référence persistée : Save / Restore ─────────────────
+
+    def _current_snapshot(self) -> dict:
+        """Instantané thread-safe de l'état courant (sans I/O)."""
+        with self._lock:
+            colors = {
+                f"stick_{i}": [list(c) for c in s.colors]
+                for i, s in enumerate(self._sticks)
+            }
+            order = [f"{s.bus_num}:{hex(s.address).lower()}" for s in self._sticks]
+            brightness = None
+            for s in self._sticks:
+                try:
+                    brightness = int(s.get_brightness())
+                    break
+                except Exception:
+                    continue
+        if brightness is None:
+            brightness = self._last_brightness
+        return {"colors": colors, "stick_order": order, "brightness": brightness}
+
+    def apply_client_order(self, order: List[str]) -> None:
+        """Applique l'ordre des sticks venu du front (drag & drop).
+
+        Les objets sticks sont réordonnés — les couleurs suivent donc leur
+        barrette physique ; les ids ``stick_i`` sont réindexés. Aucune
+        écriture disque (la persistance reste POST /api/save).
+        """
+        if not order:
+            return
+        with self._lock:
+            by_key = {
+                f"{s.bus_num}:{hex(s.address).lower()}": s
+                for s in self._sticks
+            }
+            ordered = []
+            for key in order:
+                stick = by_key.pop(str(key).lower(), None)
+                if stick is not None and stick not in ordered:
+                    ordered.append(stick)
+            for stick in self._sticks:
+                if stick not in ordered:
+                    ordered.append(stick)
+            self._sticks = ordered
+            self._bus_map = {f"stick_{i}": s for i, s in enumerate(self._sticks)}
+
+    def save_current(self, stick_order: Optional[List[str]] = None) -> dict:
+        """Fige l'état courant comme nouvelle RÉFÉRENCE (POST /api/save).
+
+        Écrit couleurs / luminosité / ordre / animation / kraken dans
+        config.json, purge les sauvegardes de fichiers (l'état est acté),
+        et retourne la référence enregistrée.
+
+        Args:
+            stick_order: ordre courant côté front (drag & drop), appliqué
+                au modèle avant le snapshot s'il est fourni.
+        """
+        from .config import load as load_config, save as save_config
+
+        if stick_order:
+            self.apply_client_order(stick_order)
+
+        snapshot = self._current_snapshot()
+        config = load_config()
+        config["colors"] = snapshot["colors"]
+        config["stick_order"] = snapshot["stick_order"]
+        config["brightness"] = snapshot["brightness"]
+
+        animation = dict(config.get("animation") or {})
+        animation.update(self.animation_settings())
+        animation["enabled"] = self.animation_running
+        if self.animation_effect:
+            animation["type"] = self.animation_effect
+        config["animation"] = animation
+
+        settings = kraken_get_settings()
+        config["kraken"] = {"lcd": settings["lcd"], "display": settings["display"]}
+
+        save_config(config)
+        kraken_commit_file_changes()
+        return _reference_payload(config)
+
+    def restore_reference(self) -> dict:
+        """Ré-applique la RÉFÉRENCE persistée (POST /api/restore).
+
+        Matériel : couleurs par stick, luminosité, ordre, réglages LCD,
+        relance éventuelle du mode d'affichage, speed/refresh si le moteur
+        d'animation tourne. Mémoire : état Kraken aligné sur la référence.
+        Fichiers : sauvegardes/corbeille restaurées.
+        """
+        from .config import load as load_config
+
+        config = load_config()
+        ref = _reference_payload(config)
+
+        # 1. Ordre des sticks (les couleurs restent indexées stick_i)
+        order = ref.get("stick_order") or []
+        with self._lock:
+            if order:
+                by_key = {
+                    f"{s.bus_num}:{hex(s.address).lower()}": s
+                    for s in self._sticks
+                }
+                ordered = []
+                for key in order:
+                    stick = by_key.pop(str(key).lower(), None)
+                    if stick is not None and stick not in ordered:
+                        ordered.append(stick)
+                for stick in self._sticks:
+                    if stick not in ordered:
+                        ordered.append(stick)
+                self._sticks = ordered
+                self._bus_map = {f"stick_{i}": s for i, s in enumerate(self._sticks)}
+            pairs = list(enumerate(self._sticks))
+
+        # 2. Couleurs + luminosité (appliquées immédiatement au matériel)
+        colors = ref.get("colors") or {}
+        for idx, stick in pairs:
+            stick_id = f"stick_{idx}"
+            leds = colors.get(stick_id)
+            if leds:
+                self.apply_colors(stick_id, leds)
+            else:
+                with self._lock:
+                    try:
+                        stick.send_direct_colors()
+                    except Exception:
+                        pass
+        self.set_all_brightness(ref.get("brightness", 255))
+
+        # 3. Animation : vitesse/refresh si le moteur tourne
+        anim = ref.get("animation") or {}
+        try:
+            self.set_smbus_refresh_rate(anim.get("refresh", 20))
+        except Exception:
+            pass
+        self._anim_speed = float(anim.get("speed", 1.0))
+        self._anim_framerate = int(anim.get("framerate", 30))
+        if self.animation_running:
+            self.set_animation_speed(self._anim_speed)
+            self.set_animation_framerate(self._anim_framerate)
+
+        # 4. Kraken : matériel (best-effort) puis état mémoire
+        kraken_settings = ref.get("kraken") or {}
+        lcd = dict(kraken_settings.get("lcd") or {})
+        display = dict(kraken_settings.get("display") or {})
+        _restore_kraken_hardware(lcd, display)
+        kraken_update_settings(lcd=lcd, display=display)
+
+        # 5. Fichiers : les sauvegardes/corbeille reviennent en place
+        kraken_restore_file_changes()
+
+        return ref
 
     # ── Animation engine (mode matrice) ─────────────────────
 
@@ -436,6 +696,8 @@ class SMBusManager:
         # Arrêter l'ancienne animation si elle tourne
         self.stop_animation()
 
+        self._anim_speed = float(speed)
+        self._anim_framerate = int(framerate)
         self._anim_engine = AnimationEngine(apply_matrix_colors)
         # Passer speed et framerate AVANT de démarrer le thread
         self._anim_engine.start(effect, params, speed=speed, framerate=framerate)
@@ -445,7 +707,8 @@ class SMBusManager:
         if self._anim_engine:
             self._anim_engine.stop()
             self._anim_engine = None
-            self._schedule_save()
+            # Pas d'auto-save : l'arrêt est appliqué au matériel, la
+            # persistance reste à la charge de POST /api/save.
 
     @property
     def animation_running(self) -> bool:
@@ -461,11 +724,13 @@ class SMBusManager:
 
     def set_animation_speed(self, speed: float):
         """Modifie la vitesse de l'animation en cours."""
+        self._anim_speed = float(speed)
         if self._anim_engine:
             self._anim_engine.set_speed(speed)
 
     def set_animation_framerate(self, fps: int):
         """Modifie le framerate de l'animation en cours."""
+        self._anim_framerate = int(fps)
         if self._anim_engine:
             self._anim_engine.set_framerate(fps)
 
@@ -520,6 +785,31 @@ async def lifespan(app: FastAPI):
     print(f"  → {len(smbus._sticks)} barrette(s) détectée(s)")
     for s in sticks_info:
         print(f"    • {s['label']}")
+
+    # Aligner l'état mémoire Kraken sur la référence persistée : liquidctl
+    # ne remonte aucun réglage, la config est notre seule connaissance de
+    # l'état au démarrage.
+    try:
+        from .config import load as load_config
+        kraken_cfg = load_config().get("kraken") or {}
+        kraken_update_settings(
+            lcd=kraken_cfg.get("lcd"),
+            display=kraken_cfg.get("display"),
+        )
+    except Exception as e:
+        print(f"⚠ État Kraken non restauré en mémoire : {e}")
+
+    # Ménage du cache de vignettes : les images d'une ancienne empreinte
+    # du moteur de rendu ne seront plus jamais servies.
+    try:
+        purge = kraken_purge_thumbs()
+        if purge.get("removed"):
+            print(f"🧹 Vignettes obsolètes purgées : {purge['removed']}")
+        elif not purge.get("ok"):
+            print(f"⚠ Purge des vignettes ignorée : {purge.get('error')}")
+    except Exception as e:
+        print(f"⚠ Purge des vignettes impossible : {e}")
+
     yield
     # Cleanup à l'arrêt
     print("🧹 Fermeture des bus SMBus...")
@@ -627,11 +917,10 @@ async def get_config():
 
 @app.put("/api/config")
 async def save_config(body: dict):
-    """Sauvegarde une configuration complète.
+    """Applique une configuration de couleurs (application immédiate).
 
     Body: {"colors": {"stick_0": [[R,G,B], ...], ...}}
-    Applique immédiatement les couleurs aux sticks.
-    Note : la persistance disque sera implémentée dans une phase future.
+    N'écrit RIEN sur disque : la persistance passe par POST /api/save.
     """
     colors = body.get("colors", {})
     for stick_id, leds in colors.items():
@@ -641,30 +930,55 @@ async def save_config(body: dict):
 
 @app.post("/api/colors/save")
 async def save_colors_endpoint():
-    """Sauvegarde les couleurs actuelles dans la configuration persistée.
+    """[Legacy] Fige l'état courant comme référence — alias de POST /api/save.
 
-    Collecte les couleurs de tous les sticks et les écrit dans
-    ~/.config/ballistix/config.json pour restauration future.
+    Conservé pour compatibilité (l'ancien front l'appelait après un
+    réordonnancement). Le flux actuel passe uniquement par /api/save.
     """
-    from .config import save_colors as persist_colors, save_brightness as persist_brightness
+    reference = smbus.save_current()
+    await ws_manager.broadcast({"type": "settings_saved", "reference": reference})
+    return {"status": "ok", "saved_colors": len(reference.get("colors", {})),
+            "brightness": reference.get("brightness"), "reference": reference}
 
-    colors = {}
-    with smbus._lock:
-        for stick_id, stick in smbus._bus_map.items():
-            colors[stick_id] = [list(c) for c in stick.colors]
 
-    persist_colors(colors)
+# ── Référence persistée : Save / Restore ──────────────────────
 
-    # Sauvegarder aussi la luminosité courante
-    brightness = 255
-    if smbus._sticks:
-        try:
-            brightness = smbus._sticks[0].get_brightness()
-        except Exception:
-            pass
-    persist_brightness(brightness)
+@app.get("/api/saved")
+async def get_saved_reference():
+    """Retourne la RÉFÉRENCE persistée (dernier POST /api/save).
 
-    return {"status": "ok", "saved_colors": len(colors), "brightness": brightness}
+    C'est l'état auquel le front compare l'état courant pour calculer
+    les modifications non enregistrées, et ce que Cancel ré-applique.
+    """
+    from .config import load as load_config
+    return _reference_payload(load_config())
+
+
+@app.post("/api/save")
+async def save_settings(body: Optional[SaveBody] = None):
+    """Fige l'état COURANT comme nouvelle référence (couleurs, luminosité,
+    ordre, animation, Kraken) et purge les sauvegardes temporaires.
+
+    Le matériel a déjà été mis à jour en temps réel ; ce seul endpoint
+    écrit config.json. Un body optionnel ``{"stick_order": [...]}``
+    applique l'ordre drag & drop du front avant de figer la référence.
+    """
+    order = body.stick_order if body else None
+    reference = smbus.save_current(order)
+    await ws_manager.broadcast({"type": "settings_saved", "reference": reference})
+    return {"status": "ok", "reference": reference}
+
+
+@app.post("/api/restore")
+async def restore_settings():
+    """Ré-applique la RÉFÉRENCE au matériel, à l'état mémoire et aux
+    fichiers (images d'écran sauvegardées, corbeille gallery).
+
+    C'est l'action « Annuler » du front : rien n'est écrit dans config.json.
+    """
+    reference = smbus.restore_reference()
+    await ws_manager.broadcast({"type": "settings_restored", "reference": reference})
+    return {"status": "ok", "reference": reference}
 
 
 @app.post("/api/apply")
@@ -722,10 +1036,14 @@ async def stop_animation():
 
 @app.get("/api/animation/status")
 async def animation_status():
-    """Retourne l'état de l'animation en cours."""
+    """Retourne l'état de l'animation en cours et ses réglages courants."""
+    settings = smbus.animation_settings()
     return {
         "running": smbus.animation_running,
         "effect": smbus.animation_effect,
+        "speed": settings["speed"],
+        "framerate": settings["framerate"],
+        "refresh": settings["refresh"],
     }
 
 
@@ -1061,6 +1379,12 @@ async def kraken_lcd_image(body: KrakenImageBody):
     return result
 
 
+@app.get("/api/kraken/lcd/settings")
+async def kraken_lcd_settings_endpoint():
+    """Réglages LCD courants (état mémoire — liquidctl ne fait aucun readback)."""
+    return kraken_get_settings()["lcd"]
+
+
 @app.post("/api/kraken/lcd/brightness")
 async def kraken_lcd_brightness(body: KrakenValueBody):
     """Règle la luminosité de l'écran LCD (0-100)."""
@@ -1083,8 +1407,12 @@ class KrakenGalleryDeleteBody(BaseModel):
     name: str
 
 class KrakenDisplayBody(BaseModel):
-    """Paramètres du thread d'affichage (intervalle en secondes)."""
-    interval: float = 10.0
+    """Paramètres du thread d'affichage.
+
+    ``interval`` : nombre de secondes (2-60) ou la sentinelle ``"asap"``
+    (« le plus souvent possible »).
+    """
+    interval: Union[float, str] = 10.0
     theme: str = "data_center"
     options: Optional[List[str]] = None
 
@@ -1116,17 +1444,38 @@ async def kraken_gallery_delete_endpoint(body: KrakenGalleryDeleteBody):
 @app.post("/api/kraken/gallery/start")
 async def kraken_gallery_start_endpoint(body: KrakenDisplayBody):
     """Démarre le diaporama gallery."""
-    return kraken_gallery_start(max(2.0, body.interval))
+    return kraken_gallery_start(body.interval)
 
 
 @app.post("/api/kraken/monitor/start")
 async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
     """Démarre le mode monitoring (stats système sur l'écran)."""
     return kraken_monitor_start(
-        max(2.0, body.interval), 
-        theme=body.theme, 
-        options=body.options
+        body.interval,
+        theme=body.theme,
+        options=body.options,
     )
+
+
+@app.post("/api/kraken/display/update")
+async def kraken_display_update_endpoint(body: KrakenDisplayBody):
+    """Applique en temps réel des réglages d'affichage (sans changer de mode).
+
+    Met à jour thème/capteurs/intervalle et RELANCE le thread monitoring
+    (ou gallery) s'il tourne déjà. Appelé par le front à chaque coche de
+    capteur / changement de thème / changement d'intervalle (débouncé).
+    """
+    return kraken_display_reconfigure(
+        interval=body.interval,
+        theme=body.theme,
+        options=body.options,
+    )
+
+
+@app.get("/api/kraken/pending")
+async def kraken_pending_endpoint():
+    """Fichiers de la session encore annulables (écran remplacé / gallery)."""
+    return kraken_pending_changes()
 
 
 @app.post("/api/kraken/display/stop")
@@ -1137,8 +1486,45 @@ async def kraken_display_stop_endpoint():
 
 @app.get("/api/kraken/display/status")
 async def kraken_display_status_endpoint():
-    """État du thread d'affichage actif."""
-    return _display_thread_status()
+    """État du thread d'affichage + réglages mémorisés (mode/theme/options/interval)."""
+    return kraken_display_status()
+
+
+@app.get("/api/kraken/themes")
+async def kraken_themes_endpoint():
+    """Liste des thèmes d'écran LCD (source unique : ballistix/monitor.py).
+
+    Le front ne recopie plus les thèmes : en ajouter un dans monitor.py
+    suffit pour qu'il apparaisse dans la galerie (vignette comprise).
+    """
+    try:
+        from .monitor import list_themes
+    except ImportError:
+        return {"ok": False, "themes": [], "count": 0,
+                "error": "Module de monitoring indisponible"}
+    themes = list_themes()
+    return {"ok": True, "themes": themes, "count": len(themes),
+            "error": None}
+
+
+@app.get("/api/kraken/themes/{key}/thumb.png")
+async def kraken_theme_thumb_endpoint(key: str):
+    """Vignette PNG d'un thème, générée par le vrai moteur de rendu PIL.
+
+    Cache disque sous ``~/.config/ballistix/kraken/thumbs/`` ; invalidé
+    dès que le moteur (monitor.py) change. Thème inconnu → 404.
+    """
+    from fastapi.responses import FileResponse
+    result = kraken_theme_thumb(key)
+    if not result["ok"]:
+        if result.get("code") == "unknown":
+            raise HTTPException(404, result.get("error") or f"Thème inconnu : {key}")
+        raise HTTPException(500, result.get("error") or "Vignette indisponible")
+    return FileResponse(
+        result["path"],
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.post("/api/kraken/monitor/preview")
