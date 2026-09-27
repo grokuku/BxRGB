@@ -4,322 +4,319 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ballistix RGB Controller</title>
-  <link rel="stylesheet" href="css/style.css">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23e94560'/%3E%3Ccircle cx='16' cy='16' r='8' fill='%23fff' opacity='0.9'/%3E%3C/svg%3E">
+
+  <!-- ════════════════════════ THÈME (holaf-tokens) ═══════════════════════
+       holaf-tokens 0.3.0 est chargé en SCRIPT CLASSIQUE SYNCHRONE en tête :
+       · c'est le mode qui marche réellement en file:// ET en http (la brique
+         0.3.0 n'a plus d'export ESM top-level, elle expose window.HolafTokens) ;
+       · synchrone = le pack mémorisé est rejoué (js/bxrgb-packs.js, juste
+         après) AVANT le premier rendu → aucun flash de thème au chargement.
+       Les autres briques holaf (toast/fetch/modal) restent en type="module"
+       en fin de body, comme avant : elles ne servent qu'à partir de
+       DOMContentLoaded.
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <script src="vendor/holaf/holaf-tokens.js"></script>
+  <script src="js/bxrgb-packs.js"></script>
+
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
   <!-- ════════════════════════ HEADER ════════════════════ -->
-  <header class="header">
-    <div class="header-title">
-      <!-- Icône mémoire -->
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="4" y="2" width="16" height="20" rx="2" ry="2"/>
-        <line x1="9" y1="6" x2="9" y2="10"/>
-        <line x1="15" y1="6" x2="15" y2="10"/>
-        <line x1="9" y1="14" x2="9" y2="18"/>
-        <line x1="15" y1="14" x2="15" y2="18"/>
-      </svg>
-      Ballistix RGB Controller
-    </div>
-    <div class="header-actions">
-      <div class="connection-indicator">
-        <span class="status-dot disconnected" id="status-dot"></span>
-        <span id="status-text">Déconnecté</span>
-        <span id="connection-mode" style="font-size:0.75rem;background:rgba(0,0,0,0.2);padding:2px 8px;border-radius:4px;color:rgba(255,255,255,0.6)"></span>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-logo" aria-hidden="true">💾</div>
+      <div>
+        <div class="brand-name">Bx<em>RGB</em> Controller</div>
+        <div class="brand-sub">Ballistix · Kraken Z53</div>
       </div>
-      <button id="toggle-orientation" class="btn-icon" title="Basculer orientation">↔</button>
-      <button id="btn-toggle-mode" class="btn-icon" title="Basculer mode matrice">⊞</button>
+    </div>
+
+    <div class="conn" title="État de la connexion au daemon">
+      <span class="status-dot disconnected" id="status-dot"></span>
+      <span id="status-text">Déconnecté</span>
+      <span class="tag" id="connection-mode"></span>
+    </div>
+
+    <div class="header-actions">
+      <button id="toggle-orientation" class="btn btn-icon" title="Basculer orientation">↔</button>
+      <button id="btn-toggle-mode" class="btn btn-icon" title="Basculer mode matrice">⊞</button>
       <span id="mode-indicator" class="badge">Mode classique</span>
-      <button class="btn btn-secondary" id="btn-rescan">
-        🔄 Re-scan
-      </button>
-      <button class="btn btn-secondary" id="btn-update" title="Vérifier et installer les mises à jour">
-        ⬇ Update
-      </button>
+      <button class="btn" id="btn-rescan">🔄 Re-scan</button>
+      <button class="btn" id="btn-update" title="Vérifier et installer les mises à jour">⬇ Update</button>
+
+      <!-- Sélecteur des 4 packs hôte — enregistrés via registerPreset()
+           (js/bxrgb-packs.js), appliqués via HolafTokens.setTheme("bxrgb-…"),
+           persistance localStorage (bxrgb-pack) et transition côté hôte. -->
+      <div class="ui-theme" id="ui-theme" role="radiogroup" aria-label="Thème d'interface">
+        <span class="ui-theme-ico" aria-hidden="true">🎨</span>
+        <button type="button" class="uit-btn" data-pack="neon" role="radio" aria-checked="true" tabindex="0" title="Néon — accent rose/violet (extends indigo-dark)" aria-label="Thème Néon"><span class="uit-swatch" aria-hidden="true"></span></button>
+        <button type="button" class="uit-btn" data-pack="clean" role="radio" aria-checked="false" tabindex="-1" title="Clean — dark désaturé, accent bleu (extends indigo-dark)" aria-label="Thème Clean"><span class="uit-swatch" aria-hidden="true"></span></button>
+        <button type="button" class="uit-btn" data-pack="studio" role="radio" aria-checked="false" tabindex="-1" title="Studio — rack mono, accent vert (extends indigo-dark)" aria-label="Thème Studio"><span class="uit-swatch" aria-hidden="true"></span></button>
+        <button type="button" class="uit-btn" data-pack="clair" role="radio" aria-checked="false" tabindex="-1" title="Clair — variante claire, accent bleu (extends indigo-light)" aria-label="Thème Clair"><span class="uit-swatch" aria-hidden="true"></span></button>
+        <span class="uit-name" id="uit-name">Néon</span>
+      </div>
     </div>
   </header>
 
   <!-- ════════════════════════ TABS ════════════════════ -->
-  <div class="tabs">
-    <button class="tab-btn active" data-tab="ballistix">💾 Ballistix</button>
-    <button class="tab-btn" data-tab="kraken">🦑 Kraken</button>
-  </div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab-btn active" id="tabbtn-ballistix" data-tab="ballistix" role="tab" aria-selected="true">💾 Ballistix</button>
+    <button class="tab-btn" id="tabbtn-kraken" data-tab="kraken" role="tab" aria-selected="false">🦑 Kraken</button>
+  </nav>
 
-  <!-- ════════════════════════ MAIN ═════════════════════ -->
-  <div id="tab-ballistix" class="tab-panel active">
-  <div class="main-content">
+  <!-- ════════════════════════ ONGLET BALLISTIX ════════════════════════ -->
+  <section id="tab-ballistix" class="tab-panel active" role="tabpanel" aria-labelledby="tabbtn-ballistix">
+    <div class="b-grid">
 
-    <!-- ─── PANEL GAUCHE : Canvas ────────────────────── -->
-    <div class="left-panel">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">💡 Prévisualisation des LEDs</span>
-        </div>
-        <div class="canvas-container">
-          <div class="canvas-wrapper">
+      <!-- ─── Colonne gauche : canvas + disposition ─── -->
+      <div class="k-col">
+        <div class="card canvas-card">
+          <div class="card-head">
+            <span class="card-title">💡 Prévisualisation des LEDs</span>
+          </div>
+          <div class="canvas-wrap">
             <canvas id="led-canvas"></canvas>
           </div>
         </div>
-      </div>
 
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">📐 Disposition des sticks</span>
-          <span style="font-size:0.8rem;color:var(--text-dim);">Glissez-déposez pour réorganiser</span>
-        </div>
-        <!-- Drag & Drop Container -->
-        <div class="dnd-container" id="dnd-container"></div>
-        <!-- Empty State -->
-        <div class="empty-state hidden" id="empty-state">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <rect x="2" y="2" width="20" height="20" rx="2" ry="2"/>
-            <line x1="2" y1="10" x2="22" y2="10"/>
-            <line x1="10" y1="2" x2="10" y2="22"/>
-          </svg>
-          <h3>Aucun stick détecté</h3>
-          <p>Assurez-vous que les barrettes Ballistix sont bien installées et cliquez sur "Re-scan".</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- ─── PANEL DROIT : Contrôles ──────────────────── -->
-    <div class="right-panel">
-
-      <!-- Infos sur la sélection (sans la liste des sticks) -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">🎯 Sélection</span>
-        </div>
-        <div class="led-info" id="led-info">
-          Cliquez sur une LED dans le canvas
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">📐 Disposition des sticks</span>
+            <span class="hint">Glissez-déposez pour réorganiser</span>
+          </div>
+          <!-- Drag & Drop (rempli par js/dnd.js) -->
+          <div class="dnd-container" id="dnd-container"></div>
+          <!-- Empty State -->
+          <div class="empty-state hidden" id="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="2" width="20" height="20" rx="2" ry="2"/>
+              <line x1="2" y1="10" x2="22" y2="10"/>
+              <line x1="10" y1="2" x2="10" y2="22"/>
+            </svg>
+            <h3>Aucun stick détecté</h3>
+            <p>Assurez-vous que les barrettes Ballistix sont bien installées et cliquez sur « Re-scan ».</p>
+          </div>
         </div>
       </div>
 
-      <!-- Color Picker -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">🎨 Couleur</span>
+      <!-- ─── Colonne droite : contrôles ─── -->
+      <div class="k-col">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">🎯 Sélection</span>
+          </div>
+          <div class="led-info" id="led-info">
+            Cliquez sur une LED dans le canvas
+          </div>
         </div>
-        <div class="color-picker-section">
-          <div class="color-picker-row">
+
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">🎨 Couleur</span>
+          </div>
+          <div class="picker-row">
             <input type="color" id="color-picker" value="#ffffff" title="Choisir une couleur">
-            <span class="color-hex" id="color-hex">#ffffff</span>
+            <span class="hex-pill"><i class="sw" id="pick-swatch" aria-hidden="true"></i><span id="color-hex">#ffffff</span></span>
           </div>
-          <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.25rem;">
-            Couleurs rapides — <em>Ctrl+click</em> pour tout le système
-          </div>
+          <div class="hint" style="margin:9px 0 6px;">Couleurs rapides — <em>Ctrl+click</em> pour tout le système</div>
           <div class="quick-colors" id="quick-colors"></div>
+          <div class="scope-note">ⓘ <b>Couleur LED ≠ thème d'interface.</b> Le picker ne colore que les LEDs
+            (canvas + pastille ci-dessus) ; l'apparence générale suit le sélecteur 🎨 du header. Les deux sont dissociés.</div>
         </div>
-      </div>
 
-      <!-- Animation Controls -->
-      <div class="card" id="animation-controls">
-        <h3>🎬 Animation</h3>
-        <div class="animation-row">
-          <button id="btn-anim-start" class="btn-primary">🔥 Incandescence</button>
-          <button id="btn-anim-rainbow" class="btn-primary" style="margin-left:4px">🌈 Rainbow</button>
-          <button id="btn-anim-stop" class="btn-secondary" disabled>⏹ Arrêter</button>
+        <div class="card" id="animation-controls">
+          <div class="card-head">
+            <span class="card-title">🎬 Animation</span>
+          </div>
+          <div class="anim-grid">
+            <button id="btn-anim-start" class="btn btn-primary">🔥 Incandescence</button>
+            <button id="btn-anim-rainbow" class="btn btn-primary">🌈 Rainbow</button>
+          </div>
+          <div class="anim-grid" style="margin-top:7px;">
+            <button id="btn-anim-stop" class="btn" disabled>⏹ Arrêter</button>
+          </div>
+          <div class="slider-row">
+            <label>Vitesse <b id="anim-speed-value">1.0×</b></label>
+            <input type="range" id="anim-speed" min="0.05" max="5.0" step="0.05" value="1.0">
+          </div>
+          <div class="slider-row">
+            <label>Refresh SMBus <b id="anim-refresh-value">20/s</b></label>
+            <input type="range" id="anim-refresh" min="1" max="30" step="1" value="20">
+          </div>
         </div>
-        <div class="animation-row">
-          <label>Vitesse : <span id="anim-speed-value">1.0×</span></label>
-          <input type="range" id="anim-speed" min="0.05" max="5.0" step="0.05" value="1.0">
-        </div>
-        <div class="animation-row">
-          <label>Refresh SMBus : <span id="anim-refresh-value">20/s</span></label>
-          <input type="range" id="anim-refresh" min="1" max="30" step="1" value="20">
-        </div>
-      </div>
 
-      <!-- Brightness -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">☀️ Luminosité</span>
-        </div>
-        <div class="brightness-section">
-          <div class="brightness-row">
-            <div class="brightness-label">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">☀️ Luminosité</span>
+            <span class="badge" id="brightness-value">255</span>
+          </div>
+          <div class="brightness-section">
+            <div class="brightness-row">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="5"/>
                 <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
                 <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
                 <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
                 <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
               </svg>
-              Luminosité
+              <input type="range" id="brightness-slider" min="0" max="255" value="255">
             </div>
-            <input type="range" id="brightness-slider" min="0" max="255" value="255">
-            <span class="brightness-value" id="brightness-value">255</span>
           </div>
         </div>
       </div>
 
     </div>
-  </div>
-  </div>
+  </section>
 
-  <!-- ─── PANEL KRAKEN ─────────────────────────────────── -->
-  <div id="tab-kraken" class="tab-panel">
-    <div class="main-content">
+  <!-- ════════════════════════ ONGLET KRAKEN (une seule page) ════════════════════════ -->
+  <section id="tab-kraken" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-kraken">
+    <div class="k-grid-a">
 
-      <div class="left-panel">
+      <!-- ─── Colonne 1 : statut + maintenance ─── -->
+      <div class="k-col">
         <div class="card">
-          <div class="card-header">
+          <div class="card-head">
             <span class="card-title">🦑 Statut Kraken</span>
             <span class="badge" id="kraken-badge">Vérification...</span>
           </div>
           <div class="kraken-status" id="kraken-status">
-            <p style="color:var(--text-dim);">Vérification de liquidctl et du Kraken Z53...</p>
+            <p class="hint">Vérification de liquidctl et du Kraken Z53...</p>
           </div>
         </div>
 
         <div class="card">
-          <div class="card-header">
+          <div class="card-head">
             <span class="card-title">⚙️ Maintenance</span>
           </div>
-          <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">
-            L'initialisation est requise après chaque démarrage à froid ou mise à jour du firmware.
-          </p>
-          <button class="btn btn-secondary" id="kraken-btn-init">🔧 Initialize</button>
+          <p class="hint" style="margin-bottom:9px;">L'initialisation est requise après chaque démarrage à froid ou mise à jour du firmware.</p>
+          <button class="btn btn-primary" id="kraken-btn-init" style="width:100%;justify-content:center;">🔧 Initialize</button>
         </div>
       </div>
 
-      <div class="right-panel">
+      <!-- ─── Colonne 2 : écran / envois ─── -->
+      <div class="k-col">
         <div class="card">
-          <div class="card-header">
+          <div class="card-head">
             <span class="card-title">🖥 Écran LCD</span>
             <span class="badge" id="kraken-lcd-badge">—</span>
           </div>
-          <div class="kraken-section">
-            <div class="kraken-row">
-              <span class="kraken-label">Mode d'affichage</span>
-            </div>
-            <div class="kraken-row">
-              <button class="btn btn-primary" id="kraken-btn-liquid" style="flex:1">🌡 Température liquide</button>
-              <button class="btn btn-primary" id="kraken-btn-monitor" style="flex:1">🖥 Monitoring</button>
-            </div>
-            <div class="kraken-row">
-              <button class="btn btn-primary" id="kraken-btn-gallery" style="flex:1">🎞 Gallery</button>
-              <button class="btn btn-secondary" id="kraken-btn-stop-display" style="flex:1" disabled>⏹ Arrêter</button>
-            </div>
-            <div class="kraken-row">
-              <span class="kraken-label">Intervalle d'actualisation : <span id="kraken-interval-value">10s</span></span>
-            </div>
-            <div class="kraken-row">
-              <input type="range" id="kraken-interval" min="5" max="60" step="5" value="10" style="flex:1">
-            </div>
-            <div class="kraken-row">
-              <span class="kraken-label">Image statique (PNG/JPEG, 640×640 conseillé)</span>
-            </div>
-            <div class="kraken-row">
-              <input type="file" id="kraken-file-image" accept="image/png,image/jpeg" class="kraken-file">
-              <button class="btn btn-secondary" id="kraken-btn-image">🖼 Envoyer l'image</button>
-            </div>
-            <div class="kraken-row">
-              <span class="kraken-label">GIF animé (≤ 20 Mo, ≤ 24 FPS)</span>
-            </div>
-            <div class="kraken-row">
-              <input type="file" id="kraken-file-gif" accept="image/gif" class="kraken-file">
-              <button class="btn btn-secondary" id="kraken-btn-gif">🎬 Envoyer le GIF</button>
-            </div>
+          <div class="hint" style="margin-bottom:6px;">Mode d'affichage</div>
+          <div class="btn-grid">
+            <button class="btn btn-primary" id="kraken-btn-liquid">🌡 Température liquide</button>
+            <button class="btn btn-primary" id="kraken-btn-monitor">🖥 Monitoring</button>
+            <button class="btn btn-primary" id="kraken-btn-gallery">🎞 Gallery</button>
+            <button class="btn" id="kraken-btn-stop-display" disabled>⏹ Arrêter</button>
+          </div>
+          <div class="slider-row">
+            <label>Intervalle d'actualisation <b id="kraken-interval-value">10s</b></label>
+            <input type="range" id="kraken-interval" min="5" max="60" step="5" value="10">
           </div>
         </div>
 
-        <div class="card" id="kraken-monitor-card">
-          <div class="card-header">
-            <span class="card-title">📊 Monitoring — configuration</span>
-            <button class="btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">🖼 Envoyer un média</span>
           </div>
-          <div class="kraken-section">
-            <div class="kraken-row">
-              <span class="kraken-label">Thème visuel</span>
-            </div>
-            <div class="kraken-row">
-              <select id="kraken-theme" class="kraken-select">
-                <option value="data_center">Data Center (Bleu Technique)</option>
-                <option value="overclock">Overclock (Rouge Agressif)</option>
-                <option value="fluid_flow">Fluid Flow (Bleu Pastel)</option>
-              </select>
-            </div>
-            <div class="kraken-row">
-              <span class="kraken-label">Capteurs à afficher</span>
-            </div>
-            <div class="kraken-row">
-              <label class="kraken-check"><input type="checkbox" id="kraken-cpu" checked> 🌡 Température CPU</label>
-              <label class="kraken-check"><input type="checkbox" id="kraken-gpu" checked> 🎮 Température GPU</label>
-            </div>
-            <div class="kraken-row">
-              <label class="kraken-check"><input type="checkbox" id="kraken-ram" checked> 💾 Mémoire RAM</label>
-              <label class="kraken-check"><input type="checkbox" id="kraken-vram" checked> 🎮 Mémoire GPU</label>
-            </div>
-            <div class="kraken-row">
-              <label class="kraken-check"><input type="checkbox" id="kraken-disks" checked> 💿 Disques</label>
-              <label class="kraken-check"><input type="checkbox" id="kraken-liquid-temp" checked> 🌡 Température liquide</label>
-            </div>
-            <div class="kraken-row">
+          <div class="hint" style="margin-bottom:6px;">Image statique — PNG/JPEG, 640×640 conseillé</div>
+          <div class="upload-row">
+            <input type="file" id="kraken-file-image" accept="image/png,image/jpeg" class="kraken-file">
+            <button class="btn" id="kraken-btn-image">🖼 Envoyer l'image</button>
+          </div>
+          <div class="hint" style="margin-bottom:6px;">GIF animé — ≤ 20 Mo, ≤ 24 FPS</div>
+          <div class="upload-row" style="margin-bottom:0;">
+            <input type="file" id="kraken-file-gif" accept="image/gif" class="kraken-file">
+            <button class="btn" id="kraken-btn-gif">🎬 Envoyer le GIF</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">☀️ Luminosité LCD</span>
+            <span class="badge" id="kraken-brightness-value">80</span>
+          </div>
+          <input type="range" id="kraken-brightness" min="0" max="100" step="1" value="80">
+          <div class="sep"></div>
+          <div class="card-head" style="margin-bottom:6px;">
+            <span class="card-title">🔄 Orientation</span>
+          </div>
+          <select id="kraken-orientation" class="kraken-select">
+            <option value="0">0° — Standard</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- ─── Colonne 3 : monitoring + galerie ─── -->
+      <div class="k-col">
+        <div class="card" id="kraken-monitor-card">
+          <div class="card-head">
+            <span class="card-title">📊 Monitoring — configuration</span>
+            <span class="card-head-tools">
+              <span class="badge">Thème : <b id="theme-key">data_center</b></span>
+              <button class="btn btn-icon" id="kraken-btn-preview" title="Générer un aperçu">👁</button>
+            </span>
+          </div>
+
+          <!-- Galerie visuelle des 3 thèmes RÉELS d'écran LCD (ballistix/monitor.py),
+               sélection injectée dans l'état par js/app.js (remplace l'ancien dropdown) -->
+          <div class="theme-gallery" id="theme-gallery" role="radiogroup" aria-label="Thème visuel de l'écran LCD"></div>
+
+          <div class="hint" style="margin-top:12px;">Capteurs à afficher</div>
+          <div class="sensors">
+            <label><input type="checkbox" id="kraken-cpu" checked> 🌡 Température CPU</label>
+            <label><input type="checkbox" id="kraken-gpu" checked> 🎮 Température GPU</label>
+            <label><input type="checkbox" id="kraken-ram" checked> 💾 Mémoire RAM</label>
+            <label><input type="checkbox" id="kraken-vram" checked> 🎮 Mémoire GPU</label>
+            <label><input type="checkbox" id="kraken-disks" checked> 💿 Disques</label>
+            <label><input type="checkbox" id="kraken-liquid-temp" checked> 🌡 Température liquide</label>
+          </div>
+
+          <div class="preview-wrap">
+            <div class="preview-frame">
               <img id="kraken-preview-img" class="kraken-preview hidden" alt="Aperçu monitoring" width="320">
+            </div>
+            <div class="preview-meta">
+              <b>Aperçu PNG</b>Rendu 640×640<br>affiché 320 px<br>
+              <span class="hint">(bouton 👁 ci-dessus)</span>
             </div>
           </div>
         </div>
 
         <div class="card" id="kraken-gallery-card">
-          <div class="card-header">
-            <span class="card-title">🎞 Gallery — images du diaporama</span>
+          <div class="card-head">
+            <span class="card-title">🎞 Gallery — diaporama</span>
             <span class="badge" id="kraken-gallery-count">0 fichier(s)</span>
           </div>
-          <div class="kraken-section">
-            <div class="kraken-row">
-              <input type="file" id="kraken-file-gallery" accept="image/png,image/jpeg,image/gif" class="kraken-file" multiple>
-              <button class="btn btn-secondary" id="kraken-btn-gallery-add">➕ Ajouter</button>
-            </div>
-            <div class="kraken-gallery-list" id="kraken-gallery-list"></div>
+          <div class="upload-row">
+            <input type="file" id="kraken-file-gallery" accept="image/png,image/jpeg,image/gif" class="kraken-file" multiple>
+            <button class="btn btn-primary" id="kraken-btn-gallery-add">➕ Ajouter</button>
           </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">☀️ Luminosité</span>
-          </div>
-          <div class="brightness-section">
-            <div class="brightness-row">
-              <div class="brightness-label">Luminosité</div>
-              <input type="range" id="kraken-brightness" min="0" max="100" value="80">
-              <span class="brightness-value" id="kraken-brightness-value">80</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">🔄 Orientation</span>
-          </div>
-          <div class="kraken-section">
-            <div class="kraken-row">
-              <select id="kraken-orientation" class="kraken-select">
-                <option value="0">0° — Standard</option>
-                <option value="90">90°</option>
-                <option value="180">180°</option>
-                <option value="270">270°</option>
-              </select>
-            </div>
-          </div>
+          <div class="kraken-gallery-list" id="kraken-gallery-list"></div>
         </div>
       </div>
 
     </div>
-  </div>
+  </section>
 
-  <!-- ════════════════════════ FOOTER ═══════════════════ -->
-  <footer class="footer">
+  <!-- ════════════════════════ FOOTER ═══════════════════════ -->
+  <footer class="app-footer">
     <button class="btn btn-danger" id="btn-reset-all">🔴 Reset All (éteindre)</button>
-    <button class="btn btn-secondary" id="btn-sync">🔄 Sync</button>
+    <button class="btn" id="btn-sync">🔄 Sync</button>
+    <span class="footer-note">Ballistix RGB Controller · thème <code>holaf-tokens</code> v0.3.0 ·
+      preset actif : <b id="footer-pack">bxrgb-neon</b> · couleur des LEDs indépendante du thème</span>
   </footer>
 
-  <!-- ════════════════════════ SCRIPTS ═══════════════════ -->
+  <!-- ════════════════════════ SCRIPTS ═══════════════════════ -->
   <!-- Briques holaf (copies pinnées). Modules ES : exposent aussi
        window.Holaf* (pattern « dual »), disponible à partir de
        DOMContentLoaded — les scripts classiques ci-dessous ne les
-       utilisent donc que dans leurs handlers DOMContentLoaded. -->
+       utilisent donc que dans leurs handlers DOMContentLoaded.
+       (holaf-tokens est déjà chargé en tête, en script classique,
+       pour l'anti-flash : voir le commentaire dans <head>.) -->
   <script type="module" src="vendor/holaf/holaf-toast.js"></script>
   <script type="module" src="vendor/holaf/holaf-fetch.js"></script>
   <script type="module" src="vendor/holaf/holaf-modal.js"></script>

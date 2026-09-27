@@ -50,6 +50,37 @@ function rgbToString(r, g, b) {
 }
 
 /**
+ * Convertit #rgb/#rrggbb en rgba(r, g, b, a).
+ * @param {string} hex
+ * @param {number} alpha — 0..1
+ * @returns {string}
+ */
+function hexToRgba(hex, alpha) {
+  const val = String(hex || '#ffffff').replace('#', '');
+  const full = val.length === 3 ? val.split('').map((c) => c + c).join('') : val;
+  const r = parseInt(full.slice(0, 2), 16) || 0;
+  const g = parseInt(full.slice(2, 4), 16) || 0;
+  const b = parseInt(full.slice(4, 6), 16) || 0;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/**
+ * Reflète la couleur LED courante sur les variables HÔTE --pick* (halo de
+ * sélection, pastille, canvas). N'écrit JAMAIS de variable --holaf-* : la
+ * couleur des LEDs est volontairement dissociée du pack d'interface, qui
+ * seul pilote --holaf-accent (sélecteur 🎨 du header).
+ * @param {string} hex
+ */
+function applyPickColor(hex) {
+  const root = document.documentElement.style;
+  root.setProperty('--pick', hex);
+  root.setProperty('--pick-soft', hexToRgba(hex, 0.16));
+  root.setProperty('--pick-glow', hexToRgba(hex, 0.5));
+  const swatch = document.getElementById('pick-swatch');
+  if (swatch) swatch.style.background = hex;
+}
+
+/**
  * Met à jour l'état disabled des contrôles selon la sélection.
  * @param {Object} state
  * @param {HTMLInputElement} picker
@@ -158,6 +189,7 @@ function initColorControls(state, sendWS, toast) {
 
     const [r, g, b] = hexToRgb(picker.value);
     hexDisplay.textContent = picker.value;
+    applyPickColor(picker.value);
 
     if (state.selected) {
       sendWS({
@@ -226,6 +258,7 @@ function initColorControls(state, sendWS, toast) {
     const hex = rgbToHex(r, g, b);
     picker.value = hex;
     hexDisplay.textContent = hex;
+    applyPickColor(hex);
 
     // Mettre à jour l'état disabled des contrôles
     updateControlsDisabled(state, picker, brightnessSlider);

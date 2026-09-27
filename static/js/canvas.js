@@ -6,6 +6,18 @@
  * Mode horizontal : sticks empilés, LEDs de gauche à droite.
  */
 
+/**
+ * Lit une variable CSS posée sur :root (palette hôte / holaf-tokens),
+ * avec repli si absente — le canvas suit ainsi le pack d'interface.
+ * @param {string} name
+ * @param {string} fallback
+ * @returns {string}
+ */
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback || '';
+}
+
 class LedCanvas {
   /**
    * @param {HTMLCanvasElement} canvasElement
@@ -251,17 +263,18 @@ class LedCanvas {
     const ctx = this.ctx;
 
     // ── Fond ───────────────────────────────────────────
-    ctx.fillStyle = '#16213e';
-    ctx.fillRect(0, 0, logicalW, logicalH);
+    // Transparent : le dégradé de thème est fourni par le CSS de
+    // .canvas-wrap (--canvas-bg) — le canvas suit le pack d'interface.
+    ctx.clearRect(0, 0, logicalW, logicalH);
 
     // ── Pas de sticks détectés ─────────────────────────
     if (sticks.length === 0) {
-      ctx.fillStyle = '#8899bb';
+      ctx.fillStyle = cssVar('--text-muted', '#8899bb');
       ctx.font = '15px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('Aucune barrette détectée.', logicalW / 2, logicalH / 2 - 14);
-      ctx.fillStyle = '#667799';
+      ctx.fillStyle = cssVar('--text-faint', '#667799');
       ctx.font = '13px "Segoe UI", sans-serif';
       ctx.fillText('Lancez le diagnostic ou ajoutez un device avec --add-device', logicalW / 2, logicalH / 2 + 14);
       return;
@@ -304,7 +317,7 @@ class LedCanvas {
       const y = this.PADDING;
 
       // Label court au-dessus du stick
-      ctx.fillStyle = '#e94560';
+      ctx.fillStyle = cssVar('--accent', '#e94560');
       ctx.font = 'bold 12px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
@@ -334,7 +347,7 @@ class LedCanvas {
         this._drawLed(ctx, lx, ly, color, isSelected, isHovered);
 
         // Petit numéro de LED — afficher le NUMÉRO LOGIQUE (1-8)
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.fillStyle = cssVar('--slot-label', 'rgba(255,255,255,0.25)');
         ctx.font = '7px "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
@@ -381,7 +394,7 @@ class LedCanvas {
         this._drawLed(ctx, lx, ly, color, isSelected, isHovered);
 
         // Petit numéro de LED en bas de chaque LED
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.fillStyle = cssVar('--slot-label', 'rgba(255,255,255,0.25)');
         ctx.font = '8px "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
@@ -434,7 +447,7 @@ class LedCanvas {
           ctx.shadowColor = `rgba(${r},${g},${b},0.6)`;
           ctx.shadowBlur = 8;
         } else {
-          ctx.fillStyle = '#333344';
+          ctx.fillStyle = cssVar('--slot-unlit', '#333344');
           ctx.shadowBlur = 0;
         }
 
@@ -501,10 +514,10 @@ class LedCanvas {
         ctx.shadowBlur = 14;
         ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
       } else {
-        ctx.fillStyle = '#1a1a3e';
+        ctx.fillStyle = cssVar('--slot-unlit', '#1a1a3e');
       }
     } else {
-      ctx.fillStyle = '#1a1a3e';
+      ctx.fillStyle = cssVar('--slot-unlit', '#1a1a3e');
     }
 
     ctx.fill();
@@ -513,18 +526,18 @@ class LedCanvas {
     ctx.shadowBlur = 0;
     ctx.lineWidth = 1.5;
     if (isSelected) {
-      ctx.strokeStyle = '#e94560';
+      ctx.strokeStyle = cssVar('--accent', '#e94560');
       ctx.lineWidth = 2.5;
-      ctx.shadowColor = 'rgba(233, 69, 96, 0.5)';
+      ctx.shadowColor = cssVar('--accent-soft', 'rgba(233, 69, 96, 0.5)');
       ctx.shadowBlur = 8;
     } else if (isHovered) {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.strokeStyle = cssVar('--text', 'rgba(255, 255, 255, 0.7)');
       ctx.lineWidth = 2;
     } else if (color) {
       const [cr, cg, cb] = color;
       ctx.strokeStyle = `rgba(${cr},${cg},${cb}, 0.4)`;
     } else {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      ctx.strokeStyle = cssVar('--slot-brd', 'rgba(255, 255, 255, 0.08)');
     }
     ctx.stroke();
 

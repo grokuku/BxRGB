@@ -71,40 +71,42 @@ const state = {
 };
 
 /* ═══════════════════════════════════════════════════════════
-   Thèmes holaf — alignés sur la palette sombre BxRGB (style.css)
+   Thèmes holaf — dérivés des tokens --holaf-* (holaf-tokens 0.3.0)
    ═══════════════════════════════════════════════════════════ */
 
-/** Variables --ht-* de HolafToast alignées sur :root (style.css). */
+/** Variables --ht-* de HolafToast branchées sur la palette holaf-tokens.
+    Les valeurs sont des var(--holaf-…) avec repli : la brique les résout
+    à la volée sur l'élément, donc toast/toast suivent le pack d'interface. */
 const TOAST_THEME = {
-  '--ht-bg': '#1c2333',            // --bg-card
-  '--ht-fg': '#ffffff',            // --text-primary
-  '--ht-border': '#484f58',        // --border-light
-  '--ht-accent-info': '#e94560',   // --accent
-  '--ht-accent-success': '#2ecc71',// --success
-  '--ht-accent-warning': '#f39c12',// --warning
-  '--ht-accent-error': '#e74c3c',  // --error
-  '--ht-shadow': '0 4px 20px rgba(0, 0, 0, 0.5)',
-  '--ht-radius': '10px',
+  '--ht-bg': 'var(--holaf-surface-elev, #1c2333)',
+  '--ht-fg': 'var(--holaf-text, #ffffff)',
+  '--ht-border': 'var(--holaf-border, #484f58)',
+  '--ht-accent-info': 'var(--holaf-accent, #e94560)',
+  '--ht-accent-success': 'var(--holaf-ok, #2ecc71)',
+  '--ht-accent-warning': 'var(--holaf-warn, #f39c12)',
+  '--ht-accent-error': 'var(--holaf-danger, #e74c3c)',
+  '--ht-shadow': 'var(--holaf-shadow, 0 4px 20px rgba(0, 0, 0, 0.5))',
+  '--ht-radius': 'var(--holaf-radius-sm, 10px)',
 };
 
-/** Variables --hm-* de HolafModal alignées sur :root (style.css). */
+/** Variables --hm-* de HolafModal branchées sur la palette holaf-tokens. */
 const MODAL_THEME = {
-  '--hm-bg': '#1c2333',            // --bg-card
-  '--hm-bg-secondary': '#161b22',  // --bg-secondary
-  '--hm-bg-input': '#0d1117',      // --bg-primary
-  '--hm-text': '#ffffff',          // --text-primary
-  '--hm-text-secondary': '#c9d1d9',// --text-secondary
-  '--hm-border': '#30363d',        // --border
-  '--hm-accent': '#e94560',        // --accent
-  '--hm-accent-hover': '#ff6b81',  // --accent-hover
-  '--hm-accent-text': '#ffffff',
-  '--hm-danger': '#e74c3c',        // --error
-  '--hm-danger-hover': '#c7324a',  // --accent-dim
-  '--hm-danger-text': '#ffffff',
+  '--hm-bg': 'var(--holaf-surface-elev, #1c2333)',
+  '--hm-bg-secondary': 'var(--holaf-surface, #161b22)',
+  '--hm-bg-input': 'var(--holaf-surface, #0d1117)',
+  '--hm-text': 'var(--holaf-text, #ffffff)',
+  '--hm-text-secondary': 'var(--holaf-text-muted, #c9d1d9)',
+  '--hm-border': 'var(--holaf-border, #30363d)',
+  '--hm-accent': 'var(--holaf-accent, #e94560)',
+  '--hm-accent-hover': 'var(--holaf-accent-hover, #ff6b81)',
+  '--hm-accent-text': 'var(--holaf-accent-text, #ffffff)',
+  '--hm-danger': 'var(--holaf-danger, #e74c3c)',
+  '--hm-danger-hover': 'var(--holaf-danger-hover, #c7324a)',
+  '--hm-danger-text': 'var(--holaf-danger-text, #ffffff)',
   '--hm-overlay-bg': 'rgba(0, 0, 0, 0.7)',
-  '--hm-radius': '10px',
+  '--hm-radius': 'var(--holaf-radius-sm, 10px)',
   '--hm-shadow': '0 8px 40px rgba(0, 0, 0, 0.6)',
-  '--hm-busy-bg': 'rgba(28, 35, 51, 0.82)',
+  '--hm-busy-bg': 'var(--holaf-surface, rgba(28, 35, 51, 0.82))',
 };
 
 /* ═══════════════════════════════════════════════════════════
@@ -230,6 +232,18 @@ async function loadInitialState() {
 }
 
 /**
+ * Met à jour le libellé du mode de connexion (tag du header).
+ * @param {string} label — « ⚡ Temps réel » ou « ⚡ REST »
+ * @param {'ok'|'warn'} tone
+ */
+function setConnectionMode(label, tone) {
+  const el = document.getElementById('connection-mode');
+  if (!el) return;
+  el.textContent = label;
+  el.style.color = tone === 'ok' ? 'var(--holaf-ok, #2ecc71)' : 'var(--holaf-warn, #e94560)';
+}
+
+/**
  * Vérifie si WebSocket est disponible et initialise la connexion.
  */
 async function initConnection() {
@@ -238,13 +252,11 @@ async function initConnection() {
 
     if (status.websocket) {
       console.log('✅ WebSocket disponible, connexion...');
-      document.getElementById('connection-mode').textContent = '⚡ Temps réel';
-      document.getElementById('connection-mode').style.color = '#2ecc71';
+      setConnectionMode('⚡ Temps réel', 'ok');
       connectWS();
     } else {
       console.log('⚠ WebSocket non disponible, mode REST');
-      document.getElementById('connection-mode').textContent = '⚡ REST';
-      document.getElementById('connection-mode').style.color = '#e94560';
+      setConnectionMode('⚡ REST', 'warn');
       state.connected = true;
       state.emit('connected');
       updateConnectionStatus(true);
@@ -254,8 +266,7 @@ async function initConnection() {
   } catch (err) {
     // Serveur pas encore prêt ? Essayer en REST direct
     console.log('⚠ Statut WS inaccessible, fallback REST:', err);
-    document.getElementById('connection-mode').textContent = '⚡ REST';
-    document.getElementById('connection-mode').style.color = '#e94560';
+    setConnectionMode('⚡ REST', 'warn');
     state.connected = true;
     state.emit('connected');
     updateConnectionStatus(true);
@@ -927,13 +938,104 @@ async function refreshDisplayStatus() {
   } catch (err) { /* silencieux */ }
 }
 
-/** Démarre le mode monitoring. */
+/* ── Thèmes d'écran LCD : galerie de vignettes (remplace l'ancien dropdown) ──
+   Valeurs EXACTES de ballistix/monitor.py:THEMES (rendu PIL 640×640).
+   La sélection n'est PAS un thème d'interface : elle part dans la config
+   monitoring (POST /api/kraken/monitor/start, champ `theme`). */
+
+/** Les 3 thèmes réels du daemon (ordre historique, data_center par défaut). */
+const LCD_THEMES = [
+  { key: 'data_center', label: 'Data Center', sub: 'Bleu Technique', def: true,
+    bg: '#050f19', text: '#c8e6ff', accent: '#00a0ff',
+    gaugeBg: '#0a1e32', gaugeStart: '#003c78', gaugeEnd: '#00b4ff' },
+  { key: 'overclock', label: 'Overclock', sub: 'Rouge Agressif',
+    bg: '#0f0505', text: '#f0f0f0', accent: '#ff0000',
+    gaugeBg: '#2d0a0a', gaugeStart: '#960000', gaugeEnd: '#ff2828' },
+  { key: 'fluid_flow', label: 'Fluid Flow', sub: 'Bleu Pastel',
+    bg: '#19232d', text: '#e6f5ff', accent: '#78d2ff',
+    gaugeBg: '#32465a', gaugeStart: '#a0d2ff', gaugeEnd: '#c8e6ff' },
+];
+
+/** Thème LCD sélectionné — source unique lue par getKrakenMonitorConfig(). */
+let krakenLcdTheme = 'data_center';
+
+/** Lignes décoratives de la vignette (forme du rendu PIL : titre, heure, jauges). */
+const LCD_THUMB_ROWS = [
+  ['CPU', 42, '48°C'],
+  ['GPU', 37, '51°C'],
+  ['RAM', 58, '9.3 Go'],
+  ['VRAM', 44, '3.5 Go'],
+  ['DISK', 61, '412 Go'],
+];
+
+/**
+ * Écran LCD simulé (vignette) — même géométrie que le rendu PIL, mis à
+ * l'échelle par --s pour rester net à la taille demandée.
+ * @param {string} key — clé du thème LCD
+ * @param {number} size — taille finale en px
+ * @returns {string} HTML de la vignette
+ */
+function lcdThumbHTML(key, size) {
+  const t = LCD_THEMES.find((x) => x.key === key) || LCD_THEMES[0];
+  const rows = LCD_THUMB_ROWS.map((r) =>
+    '<div class="lcd-row">' +
+      '<div class="lcd-rowtop"><span class="lcd-label">' + r[0] + '</span>' +
+      '<span class="lcd-val">' + r[2] + '</span></div>' +
+      '<div class="lcd-gauge"><i style="width:' + r[1] + '%"></i></div>' +
+    '</div>').join('');
+  return '<div class="lcd" style="--lcd:' + size + 'px;--s:' + (size / 640) +
+    ';--tbg:' + t.bg + ';--ttx:' + t.text + ';--tac:' + t.accent +
+    ';--tgb:' + t.gaugeBg + ';--tgs:' + t.gaugeStart + ';--tge:' + t.gaugeEnd + '"' +
+    ' role="img" aria-label="Écran Kraken — thème ' + t.label + '">' +
+      '<div class="lcd-inner">' +
+        '<div class="lcd-title">SYSTEM MONITOR</div>' +
+        '<div class="lcd-time">14:32:07</div>' +
+        '<div class="lcd-rows">' + rows + '</div>' +
+        '<div class="lcd-liquid"><span>Liquid Temperature</span><b>32.4°C</b></div>' +
+      '</div></div>';
+}
+
+/** Construit la galerie de vignettes dans #theme-gallery (si présente). */
+function renderKrakenThemeGallery() {
+  const host = document.getElementById('theme-gallery');
+  if (!host) return;
+  host.innerHTML = LCD_THEMES.map((t) =>
+    '<button type="button" class="theme-card' + (t.def ? ' selected' : '') + '"' +
+      ' data-theme="' + t.key + '" role="radio" aria-checked="' + (t.def ? 'true' : 'false') + '">' +
+      '<span class="theme-led" aria-hidden="true"></span>' +
+      '<span class="theme-check" aria-hidden="true">✓</span>' +
+      '<span class="theme-badge">actif</span>' +
+      '<div class="theme-visual">' + lcdThumbHTML(t.key, 150) + '</div>' +
+      '<div class="theme-info"><span class="theme-name">' + t.label + '</span>' +
+      '<span class="theme-sub">' + t.sub + '</span></div>' +
+    '</button>').join('');
+  host.querySelectorAll('.theme-card').forEach((card) => {
+    card.addEventListener('click', () => selectKrakenLcdTheme(card.dataset.theme));
+  });
+}
+
+/**
+ * Sélectionne un thème LCD (état visuel + clé envoyée au daemon).
+ * @param {string} key — data_center | overclock | fluid_flow
+ */
+function selectKrakenLcdTheme(key) {
+  if (!LCD_THEMES.some((t) => t.key === key)) return;
+  krakenLcdTheme = key;
+  document.querySelectorAll('#theme-gallery .theme-card').forEach((c) => {
+    const on = c.dataset.theme === key;
+    c.classList.toggle('selected', on);
+    c.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  const keyEl = document.getElementById('theme-key');
+  if (keyEl) keyEl.textContent = key;
+}
+
 /**
  * Récupère la configuration actuelle du monitoring (thème et capteurs).
  * @returns {{theme: string, options: string[]}}
  */
 function getKrakenMonitorConfig() {
-  const theme = document.getElementById('kraken-theme').value;
+  const theme = krakenLcdTheme;
   const options = [];
   if (document.getElementById('kraken-cpu').checked) options.push('cpu');
   if (document.getElementById('kraken-gpu').checked) options.push('gpu');
@@ -1403,6 +1505,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const krakenBtnInit = document.getElementById('kraken-btn-init');
   if (krakenBtnInit) krakenBtnInit.addEventListener('click', krakenInitialize);
+
+  // Galerie de thèmes LCD (remplace l'ancien <select>) — rendue avant le
+  // premier démarrage monitoring pour que krakenLcdTheme reflète l'UI.
+  renderKrakenThemeGallery();
 
   // Vérification silencieuse du Kraken au chargement (ne bloque pas l'init)
   refreshKraken();
