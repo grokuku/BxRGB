@@ -3,15 +3,11 @@
 ballistixd — Point d'entrée daemon pour le contrôleur Ballistix RGB.
 
 Version allégée sans tkinter, sans auto-sudo (prévu pour tourner en root
-via systemd). Sert uniquement le mode web.
+dans le container). Sert uniquement le mode web.
 
 Usage :
   sudo ./ballistixd --add-device 9:0x20
   sudo ./ballistixd --host 0.0.0.0 --port 8080 --add-device 9:0x20
-
-PyInstaller :
-  pyinstaller ballistixd.spec
-  → dist/ballistixd --add-device 9:0x20
 """
 
 import os
@@ -19,7 +15,7 @@ import sys
 import argparse
 
 # Ajouter le dossier parent au path pour que `ballistix` soit importable
-# (utile en dev, ignoré en mode PyInstaller car déjà bundlé)
+# (utile en dev)
 _project_dir = os.path.dirname(os.path.abspath(__file__))
 if _project_dir not in sys.path:
     sys.path.insert(0, _project_dir)

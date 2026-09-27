@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Validation front headless BxRGB — vague 3 (vignettes + galerie compacte).
+# Validation front headless BxRGB — vague 3 (vignettes + galerie compacte)
+# + refonte animations (étape D : hot-swap, dirty lighting, vitesse temps réel).
 # Usage (depuis la racine BxRGB) : bash tests/front/runall.sh
-# Le serveur mock est redémarré pour chaque scénario SAUF save → save2
-# (save2 = « F5 » après save, même état serveur).
+# Le serveur mock est redémarré pour chaque scénario SAUF :
+#   save → save2   (save2 = « F5 » après save, même état serveur)
+#   anim → anim2   (anim2 = « F5 » après animation, même état serveur)
 # Dépendance : /usr/bin/chromium (surcharge : CHROMIUM=…).
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,6 +50,12 @@ stop_server "$PID"
 echo "── Scénario Kraken statut illisible (diagnostic) ──"
 PID="$(start_server)"; sleep 0.5
 run_mode "kraken=empty&test=kraken-empty" "kraken-empty"
+stop_server "$PID"
+
+echo "── Scénario animations (hot-swap / dirty lighting / vitesse) ──"
+PID="$(start_server)"; sleep 0.5
+run_mode "test=anim&anim=fake" "anim"
+run_mode "test=anim2" "anim2"
 stop_server "$PID"
 
 echo "── Scénarios sélecteurs (5 palettes/3 dispositions ; 12/6) ──"

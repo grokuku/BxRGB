@@ -44,7 +44,6 @@
       <button id="btn-toggle-mode" class="btn btn-icon" title="Basculer mode matrice">⊞</button>
       <span id="mode-indicator" class="badge">Mode classique</span>
       <button class="btn" id="btn-rescan">🔄 Re-scan</button>
-      <button class="btn" id="btn-update" title="Vérifier et installer les mises à jour">⬇ Update</button>
 
       <!-- Sélecteur des 4 packs hôte — enregistrés via registerPreset()
            (js/bxrgb-packs.js), appliqués via HolafTokens.setTheme("bxrgb-…"),
@@ -130,21 +129,29 @@
           <div class="card-head">
             <span class="card-title">🎬 Animation</span>
           </div>
-          <div class="anim-grid">
-            <button id="btn-anim-start" class="btn btn-primary">🔥 Incandescence</button>
-            <button id="btn-anim-rainbow" class="btn btn-primary">🌈 Rainbow</button>
-          </div>
+          <!-- Modes générés depuis GET /api/animation/effects (source unique :
+               ballistix/effects.py). Jamais désactivés pendant une animation :
+               le backend fait un hot-swap. Le mode courant porte .active. -->
+          <div class="anim-grid" id="anim-modes" role="group" aria-label="Modes d'animation"></div>
+          <div class="hint hidden" id="anim-modes-hint">Catalogue d'effets indisponible (serveur injoignable).</div>
           <div class="anim-grid" style="margin-top:7px;">
             <button id="btn-anim-stop" class="btn" disabled>⏹ Arrêter</button>
           </div>
           <div class="slider-row">
-            <label>Vitesse <b id="anim-speed-value">1.0×</b></label>
-            <input type="range" id="anim-speed" min="0.05" max="5.0" step="0.05" value="1.0">
+            <label><span>Vitesse</span><b id="anim-speed-value">1.0×</b></label>
+            <input type="range" id="anim-speed" min="0.1" max="10" step="0.1" value="1.0">
+            <div class="anim-cycle" id="anim-cycle">cycle ≈ —</div>
           </div>
           <div class="slider-row">
-            <label>Refresh SMBus <b id="anim-refresh-value">20/s</b></label>
+            <label><span>Refresh SMBus</span><b id="anim-refresh-value">20/s</b></label>
             <input type="range" id="anim-refresh" min="1" max="30" step="1" value="20">
           </div>
+          <!-- Paramètres de l'effet courant : rendu générique depuis le spec
+               du registre (type float/int, bornes, défaut). -->
+          <details class="anim-params" id="anim-params-wrap" hidden>
+            <summary>⚙ Réglages de l'effet</summary>
+            <div id="anim-params"></div>
+          </details>
         </div>
 
         <div class="card">

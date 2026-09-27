@@ -9,20 +9,12 @@ Usage :
 """
 
 import asyncio
-import json
 import os
-import re
-import stat
-import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 import threading
-import urllib.request
-import urllib.error
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +22,14 @@ from pydantic import BaseModel
 
 from .core import CrucialStick, ok, fail, warn
 from .detect import detect_sticks
+from .effects import (
+    MODE_IDS,
+    UnknownEffectError,
+    cycle_seconds as effect_cycle_seconds,
+    describe_effects,
+    normalize_params,
+)
+from .runner import EffectRunner, clamp_framerate, clamp_refresh, clamp_speed
 from .kraken import (
     kraken_available, kraken_detect, kraken_status,
     kraken_initialize, kraken_set_lcd_mode, kraken_set_lcd_image,
@@ -45,12 +45,8 @@ from .kraken import (
     kraken_commit_file_changes, kraken_restore_file_changes,
 )
 
-# ── Version du daemon (pour l'auto-update) ───────────────────
+# ── Version du daemon (exposée par GET /api/status) ──────────
 DAEMON_VERSION = "0.0.1"
-GITHUB_REPO = "grokuku/BxRGB"
-BINARY_PATH = "/usr/local/bin/ballistixd"
-SERVICE_NAME = "ballistix-rgb"
-GITHUB_TIMEOUT = 15  # secondes
 
 # ── Modèles Pydantic ──────────────────────────────────────────
 
@@ -78,12 +74,20 @@ class SaveBody(BaseModel):
 def _reference_payload(config: dict) -> dict:
     """Construit la RÉFÉRENCE exposée par GET /api/saved.
 
-    Contenu : couleurs par stick, luminosité globale, ordre des sticks,
-    réglages d'animation (speed/framerate/refresh) et section kraken
-    (lcd + display). C'est exactement ce que fige POST /api/save et ce
-    que ré-applique POST /api/restore.
+    Contenu : couleurs de BASE par stick, luminosité globale, ordre des
+    sticks, section ``lighting`` (mode/running/speed/framerate/refresh/
+    params) + miroir legacy ``animation``, et section kraken (lcd +
+    display). Les frames d'animation n'y figurent JAMAIS : c'est exactement
+    ce que fige POST /api/save et ce que ré-applique POST /api/restore.
     """
-    animation = dict(config.get("animation") or {})
+    from .config import lighting_from_animation, normalize_lighting
+
+    lighting = config.get("lighting")
+    if not isinstance(lighting, dict) or not lighting:
+        # config.json pas passé par load()/migration : repli explicite.
+        lighting = lighting_from_animation(config.get("animation"))
+    lighting = normalize_lighting(lighting)
+
     kraken_cfg = config.get("kraken") or {}
     return {
         "colors": {
@@ -93,12 +97,14 @@ def _reference_payload(config: dict) -> dict:
         },
         "brightness": config.get("brightness", 255),
         "stick_order": [str(item) for item in (config.get("stick_order") or [])],
+        "lighting": lighting,
+        # Miroir de rétrocompatibilité (ancien nommage, front pas encore migré).
         "animation": {
-            "speed": animation.get("speed", 1.0),
-            "framerate": animation.get("framerate", 30),
-            "refresh": animation.get("refresh", 20),
-            "enabled": animation.get("enabled", False),
-            "type": animation.get("type", "static"),
+            "speed": lighting["speed"],
+            "framerate": lighting["framerate"],
+            "refresh": lighting["refresh"],
+            "enabled": lighting["running"],
+            "type": lighting["mode"],
         },
         "kraken": {
             "lcd": dict(kraken_cfg.get("lcd") or {}),
@@ -173,15 +179,9 @@ class SMBusManager:
     corruptions de registres lorsque plusieurs requêtes arrivent
     simultanément (REST + WebSocket).
 
-    Supporte aussi le mode matrice avec AnimationEngine pour les
-    effets animés sur l'ensemble des 32 LEDs (4 barrettes × 8 LEDs).
-    """
-    """Encapsule l'accès aux bus SMBus avec un lock thread.
-
-    Toutes les opérations SMBus sont bloquantes ; le lock garantit
-    qu'une seule opération à la fois traverse le bus, évitant les
-    corruptions de registres lorsque plusieurs requêtes arrivent
-    simultanément (REST + WebSocket).
+    Supporte aussi le mode matrice : un ``EffectRunner`` (ballistix/runner)
+    anime les 32 LEDs (4 barrettes × 8 LEDs) et écrit ses frames via
+    ``CrucialStick.write_colors`` sans jamais toucher aux couleurs de base.
     """
 
     def __init__(self):
@@ -189,19 +189,29 @@ class SMBusManager:
         self._sticks: List[CrucialStick] = []
         self._bus_map: Dict[str, CrucialStick] = {}
         self._manual_devices: List[dict] = []
-        self._anim_engine: Optional['AnimationEngine'] = None
+        # Moteur d'animation matriciel (None = arrêté).
+        self._runner: Optional[EffectRunner] = None
         self._save_timer: Optional[threading.Timer] = None
         self._smbus_refresh_rate: float = 20.0  # écritures SMBus/sec pour les animations
-        # Réglages d'animation COURANTS (mémorisés même moteur arrêté :
-        # la référence persistée les compare dans /api/saved).
+        # Réglages lumière COURANTS (mémorisés même moteur arrêté : la
+        # référence persistée les compare dans /api/saved).
         self._anim_speed: float = 1.0
         self._anim_framerate: int = 30
+        # Mode courant ("static" ou id d'effet) et paramètres d'effet.
+        self._lighting_mode: str = "static"
+        self._lighting_params: dict = {}
+        # Seams de test : horloge/sommeil injectables (horloge virtuelle).
+        self._clock: Callable[[], float] = time.monotonic
+        self._sleep: Callable[[float], None] = time.sleep
         # Dernière luminosité connue (secours si aucun stick).
         self._last_brightness: int = 255
 
-    def set_smbus_refresh_rate(self, rate: float):
+    def set_smbus_refresh_rate(self, rate: float) -> float:
         """Définit le taux max d'écriture SMBus en animations (1-30 Hz)."""
-        self._smbus_refresh_rate = max(1.0, min(30.0, float(rate)))
+        self._smbus_refresh_rate = clamp_refresh(rate)
+        if self._runner is not None:
+            self._runner.set_refresh(self._smbus_refresh_rate)
+        return self._smbus_refresh_rate
 
     def animation_settings(self) -> dict:
         """Réglages d'animation courants (speed/framerate/refresh)."""
@@ -210,6 +220,33 @@ class SMBusManager:
             "framerate": self._anim_framerate,
             "refresh": self._smbus_refresh_rate,
         }
+
+    def lighting_settings(self) -> dict:
+        """Section ``lighting`` courante (mode, état, réglages, params)."""
+        return {
+            "mode": self._lighting_mode,
+            "running": self.animation_running,
+            "speed": self._anim_speed,
+            "framerate": self._anim_framerate,
+            "refresh": self._smbus_refresh_rate,
+            "params": dict(self._lighting_params),
+        }
+
+    def set_lighting_state(self, lighting: dict) -> dict:
+        """Copie une section ``lighting`` en mémoire, SANS toucher au moteur.
+
+        Retourne la section normalisée/bornée ; l'appelant décide ensuite de
+        démarrer ou d'arrêter l'effet (reprise au boot, POST /api/restore).
+        """
+        from .config import normalize_lighting
+
+        normalized = normalize_lighting(lighting)
+        self._anim_speed = normalized["speed"]
+        self._anim_framerate = normalized["framerate"]
+        self._smbus_refresh_rate = normalized["refresh"]
+        self._lighting_mode = normalized["mode"]
+        self._lighting_params = dict(normalized["params"])
+        return normalized
 
     def _schedule_save(self):
         """Programme une sauvegarde différée (debounced 2s).
@@ -543,12 +580,20 @@ class SMBusManager:
         config["stick_order"] = snapshot["stick_order"]
         config["brightness"] = snapshot["brightness"]
 
-        animation = dict(config.get("animation") or {})
-        animation.update(self.animation_settings())
-        animation["enabled"] = self.animation_running
-        if self.animation_effect:
-            animation["type"] = self.animation_effect
-        config["animation"] = animation
+        # Couche lighting : le mode ET l'état marche/arrêt font partie de la
+        # référence (option A). Les couleurs sauvées ci-dessus sont les
+        # base_colors : plus jamais une frame d'animation (le moteur
+        # n'écrit jamais dans stick.colors).
+        lighting = self.lighting_settings()
+        config["lighting"] = lighting
+        # Miroir legacy conservé pour les outils plus anciens (schéma ≤ 3).
+        config["animation"] = {
+            "type": lighting["mode"],
+            "enabled": lighting["running"],
+            "speed": lighting["speed"],
+            "framerate": lighting["framerate"],
+            "refresh": lighting["refresh"],
+        }
 
         settings = kraken_get_settings()
         config["kraken"] = {"lcd": settings["lcd"], "display": settings["display"]}
@@ -560,10 +605,12 @@ class SMBusManager:
     def restore_reference(self) -> dict:
         """Ré-applique la RÉFÉRENCE persistée (POST /api/restore).
 
-        Matériel : couleurs par stick, luminosité, ordre, réglages LCD,
-        relance éventuelle du mode d'affichage, speed/refresh si le moteur
-        d'animation tourne. Mémoire : état Kraken aligné sur la référence.
-        Fichiers : sauvegardes/corbeille restaurées.
+        Option A : l'état marche/arrêt fait partie de la référence. Restore
+        ARRÊTE donc réellement l'animation si ``running=false`` et la
+        RELANCE (mode + vitesse de la référence) si ``running=true``.
+        Matériel : couleurs de base, luminosité, ordre, réglages LCD,
+        relance éventuelle du mode d'affichage. Mémoire : état Kraken aligné
+        sur la référence. Fichiers : sauvegardes/corbeille restaurées.
         """
         from .config import load as load_config
 
@@ -590,7 +637,12 @@ class SMBusManager:
                 self._bus_map = {f"stick_{i}": s for i, s in enumerate(self._sticks)}
             pairs = list(enumerate(self._sticks))
 
-        # 2. Couleurs + luminosité (appliquées immédiatement au matériel)
+        # 2. Lumière : réglages mémoire + arrêt du moteur AVANT d'appliquer
+        #    les couleurs de base (aucune frame ne doit gagner la bataille).
+        lighting = self.set_lighting_state(ref.get("lighting") or {})
+        self.stop_animation()
+
+        # 3. Couleurs de base + luminosité (appliquées immédiatement au matériel)
         colors = ref.get("colors") or {}
         for idx, stick in pairs:
             stick_id = f"stick_{idx}"
@@ -605,137 +657,214 @@ class SMBusManager:
                         pass
         self.set_all_brightness(ref.get("brightness", 255))
 
-        # 3. Animation : vitesse/refresh si le moteur tourne
-        anim = ref.get("animation") or {}
-        try:
-            self.set_smbus_refresh_rate(anim.get("refresh", 20))
-        except Exception:
-            pass
-        self._anim_speed = float(anim.get("speed", 1.0))
-        self._anim_framerate = int(anim.get("framerate", 30))
-        if self.animation_running:
-            self.set_animation_speed(self._anim_speed)
-            self.set_animation_framerate(self._anim_framerate)
+        # 4. Relance réelle si la référence dit running=true.
+        if lighting["running"]:
+            self.start_animation(
+                lighting["mode"], lighting["params"],
+                speed=lighting["speed"],
+                framerate=lighting["framerate"],
+                refresh=lighting["refresh"],
+            )
 
-        # 4. Kraken : matériel (best-effort) puis état mémoire
+        # 5. Kraken : matériel (best-effort) puis état mémoire
         kraken_settings = ref.get("kraken") or {}
         lcd = dict(kraken_settings.get("lcd") or {})
         display = dict(kraken_settings.get("display") or {})
         _restore_kraken_hardware(lcd, display)
         kraken_update_settings(lcd=lcd, display=display)
 
-        # 5. Fichiers : les sauvegardes/corbeille reviennent en place
+        # 6. Fichiers : les sauvegardes/corbeille reviennent en place
         kraken_restore_file_changes()
 
         return ref
 
     # ── Animation engine (mode matrice) ─────────────────────
 
-    def start_animation(self, effect: str = "incandescence", params: dict = None,
-                          speed: float = 1.0, framerate: int = 30):
-        """Démarre une animation en mode matrice.
+    def _matrix_base_colors(self) -> List[List[int]]:
+        """Couche ``base_colors`` aplatie en matrice de 32 LEDs (4 × 8).
 
-        Toutes les LEDs des 4 barrettes sont traitées comme une
-        seule matrice de 32 LEDs. Le moteur d'animation tourne
-        dans un thread séparé et appelle un callback à chaque frame.
+        Lit ``stick.colors`` — que le moteur ne modifie JAMAIS — et complète
+        en noir s'il y a moins de 4 barrettes. Relu à chaque frame par le
+        runner : une édition de couleur à chaud est donc prise en compte.
+        """
+        with self._lock:
+            colors: List[List[int]] = []
+            for stick in self._sticks[:4]:
+                for color in stick.colors[:8]:
+                    colors.append([int(color[0]), int(color[1]), int(color[2])])
+        while len(colors) < 32:
+            colors.append([0, 0, 0])
+        return colors
+
+    def _write_animation_frame(self, colors_flat: List[List[int]]) -> None:
+        """Transport matériel d'une frame : n'écrase JAMAIS les base_colors.
+
+        Appelé par le runner au plus ``refresh`` fois par seconde. Diffuse
+        aussi la frame aux clients WebSocket (le front anime le canvas) ; la
+        couche persistable (``stick.colors``) reste intacte.
+        """
+        with self._lock:
+            for stick_idx, stick in enumerate(self._sticks):
+                start = stick_idx * 8
+                frame = [list(c) for c in colors_flat[start:start + 8]]
+                if frame:
+                    stick.write_colors(frame)
+
+        if loop is None:
+            return
+        colors_dict = {
+            f"stick_{stick_idx}": [
+                [min(255, max(0, int(c))) for c in px]
+                for px in colors_flat[stick_idx * 8:stick_idx * 8 + 8]
+            ]
+            for stick_idx in range(len(self._sticks))
+        }
+        try:
+            asyncio.run_coroutine_threadsafe(
+                ws_manager.broadcast({
+                    "type": "animation_frame",
+                    "colors": colors_dict,
+                    "matrix": [
+                        [min(255, max(0, int(c))) for c in px]
+                        for px in colors_flat[:32]
+                    ],
+                }),
+                loop,
+            )
+        except Exception as e:
+            print(f"⚠ WS broadcast: {e}")
+
+    def start_animation(self, effect: str = "incandescence", params: dict = None,
+                        speed: Optional[float] = None,
+                        framerate: Optional[int] = None,
+                        refresh: Optional[float] = None):
+        """Démarre (ou hot-swap) un effet matriciel sur les 32 LEDs.
+
+        Toutes les LEDs des 4 barrettes sont traitées comme une seule
+        matrice. L'ancien moteur est arrêté AVANT l'installation du nouveau :
+        un changement de mode est donc toujours un hot-swap réussi.
 
         Args:
-            effect: nom de l'effet (ex: "incandescence")
-            params: dictionnaire de paramètres spécifiques à l'effet
-            speed: multiplicateur de vitesse (0.05 = très lent, 10.0 = rapide)
-            framerate: images par seconde (max 30 pour éviter de floder SMBus)
+            effect: id d'effet (``EFFECTS``) ou ``"static"`` (mode repos).
+            params: paramètres spécifiques à l'effet (normalisés/bornés).
+            speed: multiplicateur de vitesse (0.1–10.0) ; None = inchangé.
+            framerate: cadence de rendu (1–30 fps) ; None = inchangé.
+            refresh: écritures SMBus/sec (1–30) ; None = inchangé.
+
+        Raises:
+            UnknownEffectError: mode inconnu — dans ce cas l'ANCIEN moteur
+                reste actif (aucun état modifié).
         """
-        from .animations import AnimationEngine
+        mode = effect if effect is not None else "incandescence"
+        if not isinstance(mode, str) or mode not in MODE_IDS:
+            raise UnknownEffectError(mode)
 
-        _last_smbus_write = 0.0
+        if speed is not None:
+            self._anim_speed = clamp_speed(speed)
+        if framerate is not None:
+            self._anim_framerate = clamp_framerate(framerate)
+        if refresh is not None:
+            self._smbus_refresh_rate = clamp_refresh(refresh)
 
-        def apply_matrix_colors(colors_flat):
-            """Reçoit 32 couleurs et les distribue aux 4 sticks.
+        if mode == "static":
+            # Mode repos : aucun moteur, retour aux couleurs de base.
+            self.stop_animation()
+            self._lighting_mode = "static"
+            self._lighting_params = {}
+            return
 
-            Inclut un garde-fou temporel (8 écritures/sec max) pour
-            réduire le clignotement causé par l'écriture séquentielle
-            R, G, B sur le bus SMBus.
+        normalized_params = normalize_params(mode, params)
 
-            Utilise send_direct_colors() (méthode confirmée fonctionnelle)
-            au lieu de set_led_individual() qui est cassé.
-            """
-            nonlocal _last_smbus_write
-            now = time.time()
-            min_interval = 1.0 / self._smbus_refresh_rate  # Taux configurable
-            if now - _last_smbus_write < min_interval:
-                return  # Trop tôt, on skip cette frame
-            _last_smbus_write = now
-
-            with self._lock:
-                for stick_idx, stick in enumerate(self._sticks):
-                    for led_idx in range(8):
-                        matrix_idx = stick_idx * 8 + led_idx
-                        if matrix_idx < len(colors_flat):
-                            r, g, b = colors_flat[matrix_idx]
-                            stick.colors[led_idx] = (min(255, max(0, r)), min(255, max(0, g)), min(255, max(0, b)))
-                    stick.send_direct_colors()
-
-            # 3. Diffuser les couleurs via WebSocket pour l'interface web
-            colors_dict = {}
-            for stick_idx, stick in enumerate(self._sticks):
-                colors_dict[f"stick_{stick_idx}"] = [list(c) for c in stick.colors]
-
-            try:
-                if loop is not None:
-                    asyncio.run_coroutine_threadsafe(
-                        ws_manager.broadcast({
-                            "type": "animation_frame",
-                            "colors": colors_dict,
-                            "matrix": [[
-                                min(255, max(0, int(c)))
-                                for c in colors_flat[i]
-                            ] for i in range(min(32, len(colors_flat)))],
-                        }),
-                        loop,
-                    )
-            except Exception as e:
-                print(f"⚠ WS broadcast: {e}")
-
-        # Arrêter l'ancienne animation si elle tourne
+        # Hot-swap : arrêter l'ancien moteur avant d'installer le nouveau.
         self.stop_animation()
 
-        self._anim_speed = float(speed)
-        self._anim_framerate = int(framerate)
-        self._anim_engine = AnimationEngine(apply_matrix_colors)
-        # Passer speed et framerate AVANT de démarrer le thread
-        self._anim_engine.start(effect, params, speed=speed, framerate=framerate)
+        self._lighting_mode = mode
+        self._lighting_params = normalized_params
+        runner = EffectRunner(
+            mode,
+            normalized_params,
+            self._matrix_base_colors,    # relu à chaque frame (édition à chaud)
+            self._write_animation_frame,  # transport matériel + WS
+            speed=self._anim_speed,
+            framerate=self._anim_framerate,
+            refresh=self._smbus_refresh_rate,
+            clock=self._clock,
+            sleep=self._sleep,
+        )
+        self._runner = runner
+        runner.start()
 
     def stop_animation(self):
-        """Arrête l'animation et revient en mode classique (LEDs éteintes)."""
-        if self._anim_engine:
-            self._anim_engine.stop()
-            self._anim_engine = None
-            # Pas d'auto-save : l'arrêt est appliqué au matériel, la
-            # persistance reste à la charge de POST /api/save.
+        """Arrête le moteur et ré-affiche les couleurs de base sur le matériel.
+
+        Une frame d'animation est transitoire : à l'arrêt, les LEDs
+        reprennent la couche ``base_colors`` (seule persistable).
+        """
+        runner = self._runner
+        self._runner = None
+        if runner is not None:
+            runner.stop()
+        if self._sticks:
+            self.apply_all()
 
     @property
     def animation_running(self) -> bool:
-        """Retourne True si une animation est en cours."""
-        return self._anim_engine is not None and self._anim_engine.is_running
+        """True si un effet tourne réellement (thread vivant)."""
+        return self._runner is not None and self._runner.is_running
 
     @property
     def animation_effect(self) -> Optional[str]:
-        """Retourne le nom de l'effet en cours, ou None."""
-        if self._anim_engine and self._anim_engine.is_running:
-            return self._anim_engine.effect
+        """Nom de l'effet en cours (legacy), ou None si arrêté."""
+        runner = self._runner
+        if runner is not None and runner.is_running:
+            return runner.effect
         return None
 
-    def set_animation_speed(self, speed: float):
-        """Modifie la vitesse de l'animation en cours."""
-        self._anim_speed = float(speed)
-        if self._anim_engine:
-            self._anim_engine.set_speed(speed)
+    @property
+    def animation_runner(self) -> Optional[EffectRunner]:
+        """Runner actif (stats/diagnostic), ou None si arrêté."""
+        return self._runner
 
-    def set_animation_framerate(self, fps: int):
-        """Modifie le framerate de l'animation en cours."""
-        self._anim_framerate = int(fps)
-        if self._anim_engine:
-            self._anim_engine.set_framerate(fps)
+    def animation_status(self) -> dict:
+        """État complet de la lumière (contrat GET /api/animation/status).
+
+        ``cycle_seconds`` est la durée RÉELLE d'un cycle à la vitesse
+        courante (paramètre de cycle ÷ vitesse) : elle change donc dès que
+        la vitesse change, ce qui prouve l'effet à chaud. ``effect`` est le
+        miroir legacy (None à l'arrêt) du champ ``mode``.
+        """
+        cycle: Optional[float] = None
+        if self._lighting_mode != "static":
+            base_cycle = effect_cycle_seconds(self._lighting_mode,
+                                              self._lighting_params)
+            if base_cycle is not None:
+                cycle = base_cycle / self._anim_speed
+        stats = self._runner.stats() if self._runner is not None else {}
+        return {
+            "running": self.animation_running,
+            "mode": self._lighting_mode,
+            "effect": self.animation_effect,
+            "speed": self._anim_speed,
+            "framerate": self._anim_framerate,
+            "refresh": self._smbus_refresh_rate,
+            "params": dict(self._lighting_params),
+            "cycle_seconds": round(cycle, 4) if cycle is not None else None,
+            "fps": stats.get("fps"),
+        }
+
+    def set_animation_speed(self, speed: float) -> float:
+        """Modifie la vitesse à chaud (relue à chaque frame par le runner)."""
+        self._anim_speed = clamp_speed(speed)
+        if self._runner is not None:
+            self._runner.set_speed(self._anim_speed)
+        return self._anim_speed
+
+    def set_animation_framerate(self, fps: int) -> int:
+        """Modifie le framerate à chaud."""
+        self._anim_framerate = clamp_framerate(fps)
+        if self._runner is not None:
+            self._runner.set_framerate(self._anim_framerate)
+        return self._anim_framerate
 
     # ── Cleanup ───────────────────────────────────────────────
 
@@ -788,6 +917,26 @@ async def lifespan(app: FastAPI):
     print(f"  → {len(smbus._sticks)} barrette(s) détectée(s)")
     for s in sticks_info:
         print(f"    • {s['label']}")
+
+    # Reprendre l'état lumière persisté : les réglages exposés par
+    # GET /api/animation/status sont justes dès l'ouverture (plus de faux
+    # « dirty » au démarrage) et une animation `running=true` est réellement
+    # relancée (décision utilisateur).
+    try:
+        from .config import load as load_config
+        lighting = smbus.set_lighting_state(
+            (load_config().get("lighting") or {}))
+        if lighting["running"]:
+            smbus.start_animation(
+                lighting["mode"], lighting["params"],
+                speed=lighting["speed"],
+                framerate=lighting["framerate"],
+                refresh=lighting["refresh"],
+            )
+            print(f"▶ Animation reprise au démarrage : {lighting['mode']} "
+                  f"({lighting['speed']:.2f}×)")
+    except Exception as e:
+        print(f"⚠ Animation non reprise au démarrage : {e}")
 
     # Aligner l'état mémoire Kraken sur la référence persistée : liquidctl
     # ne remonte aucun réglage, la config est notre seule connaissance de
@@ -996,68 +1145,101 @@ async def apply_colors():
 # Routes Animation
 # ═══════════════════════════════════════════════════════════════
 
+@app.get("/api/animation/effects")
+async def animation_effects():
+    """Catalogue des effets disponibles (source unique : ballistix/effects).
+
+    Retourne ``[{id, label, params:[{id,label,type,default,min,max}]}]``.
+    """
+    return describe_effects()
+
+
 @app.post("/api/animation/start")
 async def start_animation(body: dict = {}):
-    """Démarre une animation en mode matrice.
+    """Démarre une animation matricielle (hot-swap garanti).
 
-    Body (optionnel):
+    Body :
         {
-            "effect": "incandescence",
+            "mode": "incandescence",  # nouveau nom ("effect" accepté legacy)
             "params": {},
-            "speed": 1.0,        # optionnel
-            "framerate": 30       # optionnel
+            "speed": 1.0,             # optionnel (0.1–10.0)
+            "framerate": 30,          # optionnel (1–30)
+            "refresh": 20             # optionnel (1–30)
         }
+
+    Réponse 400 si le mode est inconnu (l'animation en cours continue).
+    ``mode="static"`` arrête l'animation et revient aux couleurs de base.
     """
-    effect = body.get("effect", "incandescence")
-    params = body.get("params", {})
-    speed = body.get("speed", 1.0)
-    framerate = body.get("framerate", 30)
+    mode = body.get("mode", body.get("effect", "incandescence"))
+    params = body.get("params")
+    speed = body.get("speed")
+    framerate = body.get("framerate")
+    refresh = body.get("refresh")
 
-    smbus.start_animation(effect, params, speed=speed, framerate=framerate)
+    try:
+        smbus.start_animation(mode, params, speed=speed,
+                              framerate=framerate, refresh=refresh)
+    except UnknownEffectError as e:
+        raise HTTPException(400, str(e))
 
+    status = smbus.animation_status()
     await ws_manager.broadcast({
         "type": "animation_started",
-        "effect": effect,
-        "speed": speed,
-        "framerate": framerate,
+        "effect": status["mode"],  # legacy pour le front pas encore migré
+        "mode": status["mode"],
+        "speed": status["speed"],
+        "framerate": status["framerate"],
     })
-    return {
-        "status": "ok",
-        "effect": effect,
-        "speed": speed,
-        "framerate": framerate,
-    }
+    return {"status": "ok", **status}
 
 
 @app.post("/api/animation/stop")
-async def stop_animation():
-    """Arrête l'animation en cours. Les LEDs restent sur leur dernière couleur."""
+async def stop_animation(body: dict = {}):
+    """Arrête l'animation (retour aux couleurs de base) et retourne l'état."""
     smbus.stop_animation()
+    status = smbus.animation_status()
     await ws_manager.broadcast({"type": "animation_stopped"})
-    return {"status": "ok"}
+    return {"status": "ok", **status}
 
 
 @app.get("/api/animation/status")
 async def animation_status():
-    """Retourne l'état de l'animation en cours et ses réglages courants."""
-    settings = smbus.animation_settings()
-    return {
-        "running": smbus.animation_running,
-        "effect": smbus.animation_effect,
-        "speed": settings["speed"],
-        "framerate": settings["framerate"],
-        "refresh": settings["refresh"],
-    }
+    """État de la lumière : mode, marche/arrêt, réglages, cycle réel, fps.
 
+    Contrat : ``{running, mode, speed, framerate, refresh, cycle_seconds}``
+    (+ ``effect`` legacy, ``params`` et ``fps``).
+    """
+    return smbus.animation_status()
+
+
+@app.post("/api/animation/update")
+async def update_animation(body: dict = {}):
+    """Applique des réglages À CHAUD, sans redémarrer l'effet.
+
+    Body : ``{"speed"?: float, "framerate"?: int, "refresh"?: float}``.
+    """
+    if body.get("speed") is not None:
+        smbus.set_animation_speed(body["speed"])
+    if body.get("framerate") is not None:
+        smbus.set_animation_framerate(body["framerate"])
+    if body.get("refresh") is not None:
+        smbus.set_smbus_refresh_rate(body["refresh"])
+    status = smbus.animation_status()
+    await ws_manager.broadcast({
+        "type": "animation_update",
+        "speed": status["speed"],
+        "framerate": status["framerate"],
+        "refresh": status["refresh"],
+    })
+    return {"status": "ok", **status}
+
+
+# ── Routes de compatibilité (front pas encore migré) ─────────
 
 @app.post("/api/animation/speed")
 async def set_animation_speed(body: dict = {}):
-    """Modifie la vitesse de l'animation en cours.
-
-    Body: {"speed": 1.0}  (0.1 = lent, 10.0 = rapide)
-    """
-    speed = body.get("speed", 1.0)
-    smbus.set_animation_speed(speed)
+    """[Compat] Body : {"speed": 1.0} (0.1 = lent, 10.0 = rapide) — borné."""
+    speed = smbus.set_animation_speed(body.get("speed", 1.0))
     await ws_manager.broadcast({
         "type": "animation_speed",
         "speed": speed,
@@ -1067,237 +1249,9 @@ async def set_animation_speed(body: dict = {}):
 
 @app.post("/api/animation/refresh")
 async def set_animation_refresh(body: dict = {}):
-    """Modifie le taux de rafraîchissement SMBus (1-30 Hz)."""
-    rate = body.get("rate", 20)
-    smbus.set_smbus_refresh_rate(rate)
+    """[Compat] Body : {"rate": 20} — écritures SMBus par seconde (1-30)."""
+    rate = smbus.set_smbus_refresh_rate(body.get("rate", 20))
     return {"status": "ok", "rate": rate}
-
-
-# ═══════════════════════════════════════════════════════════════
-# Routes Auto-Update
-# ═══════════════════════════════════════════════════════════════
-
-def _fetch_github_release() -> dict:
-    """Récupère la dernière release via l'API GitHub.
-
-    Returns:
-        dict: réponse JSON de l'API GitHub (tag_name, assets, ...)
-
-    Raises:
-        HTTPException: si la requête échoue.
-    """
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "BxRGB-Updater",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            raise HTTPException(404, "Aucune release GitHub trouvée")
-        raise HTTPException(502, f"Erreur API GitHub: HTTP {e.code}")
-    except urllib.error.URLError as e:
-        raise HTTPException(502, f"Impossible de joindre GitHub: {e.reason}")
-    except Exception as e:
-        raise HTTPException(500, f"Erreur lors de la récupération de la release: {e}")
-
-
-def _parse_version(tag: str) -> str:
-    """Extrait le numéro de version depuis un tag (ex: 'v0.0.2' → '0.0.2')."""
-    return tag.lstrip("vV").strip()
-
-
-def _version_tuple(v: str) -> tuple:
-    """Convertit une version string en tuple comparable (ex: '0.0.2' → (0, 0, 2))."""
-    parts = re.split(r'[.\-]', v)
-    result = []
-    for p in parts:
-        try:
-            result.append(int(p))
-        except ValueError:
-            result.append(0)
-    return tuple(result)
-
-
-@app.get("/api/update/check")
-async def update_check():
-    """Vérifie si une mise à jour est disponible sur GitHub.
-
-    Ne télécharge rien — compare seulement la version actuelle
-    avec la dernière release publiée.
-    """
-    release = _fetch_github_release()
-    latest_tag = release.get("tag_name", "")
-    latest_version = _parse_version(latest_tag)
-    current_version = DAEMON_VERSION
-
-    update_available = _version_tuple(latest_version) > _version_tuple(current_version)
-
-    return {
-        "current": current_version,
-        "latest": latest_version,
-        "update_available": update_available,
-    }
-
-
-@app.post("/api/update")
-async def perform_update():
-    """Télécharge et installe la dernière release GitHub.
-
-    Étapes:
-    1. Récupère la dernière release GitHub
-    2. Vérifie si une mise à jour est nécessaire
-    3. Télécharge l'asset tar.gz contenant le binaire ballistixd
-    4. Extrait le binaire vers un fichier temporaire
-    5. Remplace atomiquement /usr/local/bin/ballistixd
-    6. Redémarre le service systemd ballistix-rgb
-
-    En cas d'échec à any étape, le binaire existant n'est pas touché.
-    """
-    # ── 1. Récupérer la dernière release ──
-    release = _fetch_github_release()
-    latest_tag = release.get("tag_name", "")
-    latest_version = _parse_version(latest_tag)
-    current_version = DAEMON_VERSION
-
-    # ── 2. Vérifier si une update est nécessaire ──
-    if _version_tuple(latest_version) <= _version_tuple(current_version):
-        return {
-            "status": "up-to-date",
-            "current": current_version,
-            "latest": latest_version,
-        }
-
-    # ── 3. Trouver l'asset tar.gz ──
-    assets = release.get("assets", [])
-    download_url = None
-    for asset in assets:
-        name = asset.get("name", "")
-        if name.startswith("bxrgb-") and name.endswith(".tar.gz"):
-            download_url = asset.get("browser_download_url")
-            break
-
-    if not download_url:
-        raise HTTPException(
-            404,
-            "Aucun asset 'bxrgb-*.tar.gz' trouvé dans la dernière release",
-        )
-
-    # ── 4. Télécharger le tar.gz ──
-    try:
-        dl_req = urllib.request.Request(download_url, headers={
-            "User-Agent": "BxRGB-Updater",
-        })
-        with urllib.request.urlopen(dl_req, timeout=GITHUB_TIMEOUT) as resp:
-            tar_data = resp.read()
-    except Exception as e:
-        raise HTTPException(502, f"Échec du téléchargement: {e}")
-
-    # ── 5. Extraire le binaire ballistixd du tar.gz ──
-    tmp_dir = None
-    try:
-        tmp_dir = tempfile.mkdtemp(prefix="bxrgb_update_")
-        tar_path = os.path.join(tmp_dir, "release.tar.gz")
-        with open(tar_path, "wb") as f:
-            f.write(tar_data)
-
-        # Extraire et chercher le binaire ballistixd
-        extracted_binary = None
-        with tarfile.open(tar_path, "r:gz") as tar:
-            for member in tar.getmembers():
-                # Chercher un fichier nommé ballistixd (à la racine ou dans un sous-dossier)
-                member_name = os.path.basename(member.name)
-                if member_name == "ballistixd" and member.isfile():
-                    tar.extract(member, path=tmp_dir)
-                    extracted_binary = os.path.join(tmp_dir, member.name)
-                    break
-
-        if not extracted_binary or not os.path.isfile(extracted_binary):
-            raise HTTPException(
-                500,
-                "Binaire 'ballistixd' introuvable dans l'archive tar.gz",
-            )
-
-        # ── 6. Remplacer le binaire atomiquement ──
-        if not os.path.isdir(os.path.dirname(BINARY_PATH)):
-            raise HTTPException(500, f"Dossier {os.path.dirname(BINARY_PATH)} introuvable")
-
-        new_path = BINARY_PATH + ".new"
-
-        # Copier le binaire extrait vers new_path
-        import shutil
-        shutil.copy2(extracted_binary, new_path)
-
-        # chmod +x
-        os.chmod(new_path, os.stat(new_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-        # Remplacement atomique
-        os.replace(new_path, BINARY_PATH)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Nettoyer le .new s'il existe — ne jamais corrompre le binaire actuel
-        new_path = BINARY_PATH + ".new"
-        try:
-            if os.path.exists(new_path):
-                os.remove(new_path)
-        except Exception:
-            pass
-        raise HTTPException(500, f"Échec de l'installation du binaire: {e}")
-    finally:
-        # Nettoyer le dossier temporaire
-        if tmp_dir:
-            import shutil
-            try:
-                shutil.rmtree(tmp_dir)
-            except Exception:
-                pass
-
-    # ── 7. Redémarrer le service systemd ──
-    try:
-        result = subprocess.run(
-            ["systemctl", "restart", SERVICE_NAME],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            raise HTTPException(
-                500,
-                f"Binaire mis à jour mais échec du redémarrage du service "
-                f"'{SERVICE_NAME}': {stderr or 'erreur inconnue'}",
-            )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(
-            504,
-            f"Binaire mis à jour mais timeout lors du redémarrage du service "
-            f"'{SERVICE_NAME}'. Le service devrait redémarrer automatiquement.",
-        )
-    except FileNotFoundError:
-        raise HTTPException(
-            500,
-            "systemctl introuvable — le binaire a été mis à jour mais le service "
-            "n'a pas pu être redémarré automatiquement. Redémarrez manuellement.",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            500,
-            f"Binaire mis à jour mais erreur lors du redémarrage: {e}",
-        )
-
-    return {
-        "status": "updated",
-        "current": current_version,
-        "latest": latest_version,
-        "message": f"Mis à jour de {current_version} → {latest_version}. Service redémarré.",
-    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1775,7 +1729,7 @@ def run_server(host: str = "0.0.0.0",
             import webbrowser
             webbrowser.open(f"http://localhost:{port}")
         except Exception:
-            pass  # Pas de display (systemd, SSH, etc.)
+            pass  # Pas de display (environnement sans écran, SSH, etc.)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

@@ -78,6 +78,64 @@ const FAKE_LAYOUTS = Array.from({ length: 3 }, (_, i) => ({
   default: false, is_new: true,
 }));
 
+/* Registre d'effets — miroir minimal de ballistix/effects.py::EFFECTS
+   (ids, libellés, params : type/bornes/défauts + paramètre de cycle). */
+const MOCK_EFFECTS = [
+  {
+    id: 'incandescence', label: 'Incandescence', cycle_param: 'cycle_seconds',
+    params: [
+      { id: 'cycle_seconds', label: 'Durée de cycle (s)', type: 'float', default: 2.0, min: 0.2, max: 30.0 },
+      { id: 'min_brightness', label: 'Luminosité minimale', type: 'float', default: 0.30, min: 0.0, max: 1.0 },
+      { id: 'max_brightness', label: 'Luminosité maximale', type: 'float', default: 1.0, min: 0.0, max: 1.0 },
+      { id: 'sparkle', label: 'Scintillement', type: 'float', default: 0.25, min: 0.0, max: 1.0 },
+      { id: 'seed', label: 'Graine aléatoire', type: 'int', default: 0, min: 0, max: 2147483647 },
+    ],
+  },
+  {
+    id: 'rainbow', label: 'Rainbow', cycle_param: 'period_seconds',
+    params: [
+      { id: 'period_seconds', label: 'Période (s)', type: 'float', default: 6.0, min: 0.5, max: 60.0 },
+      { id: 'hue_spread', label: 'Étalement des teintes', type: 'float', default: 1.0, min: 0.0, max: 2.0 },
+    ],
+  },
+];
+
+/** Catalogue exposé par /api/animation/effects (effet factice ?anim=fake). */
+function effectsForRequest() {
+  const list = MOCK_EFFECTS.map((e) => ({
+    id: e.id, label: e.label, params: e.params.map((spec) => Object.assign({}, spec)),
+  }));
+  if (S.animParam === 'fake') {
+    // Effet que le « backend » ne connaît pas : sert à prouver la gestion du 400.
+    list.push({ id: 'pulse_fake', label: 'Pulse (factice)', params: [] });
+  }
+  return list;
+}
+
+/** Effet RÉELLEMENT connu du backend mocké (le factice n'en est pas un). */
+function mockEffectById(id) {
+  return MOCK_EFFECTS.find((e) => e.id === id) || null;
+}
+
+function normalizeMockParams(effect, raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const out = {};
+  effect.params.forEach((spec) => {
+    let v = src[spec.id] !== undefined ? src[spec.id] : spec.default;
+    v = spec.type === 'int' ? parseInt(v, 10) : parseFloat(v);
+    if (!isFinite(v)) v = spec.default;
+    v = Math.max(spec.min, Math.min(spec.max, v));
+    out[spec.id] = v;
+  });
+  return out;
+}
+
+function mockCycle(effect, params, speed) {
+  const base = params[effect.cycle_param];
+  const s = Number(speed) > 0 ? Number(speed) : 1;
+  return Math.round((base / s) * 10000) / 10000;
+}
+
 function freshState() {
   const makeColors = (base) =>
     Array.from({ length: 8 }, (_, i) => [(base[0] + i * 7) & 255, base[1], (base[2] + i * 3) & 255]);
@@ -90,7 +148,11 @@ function freshState() {
   return {
     sticks,
     saved: savedPayload(sticks),
-    animation: { running: false, effect: null, speed: 1.0, framerate: 30, refresh: 20 },
+    animation: {
+      running: false, mode: 'static', effect: null,
+      speed: 1.0, framerate: 24, refresh: 20,
+      cycle_seconds: null, params: {}, fps: 0, phase: 0,
+    },
     lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
     display: { running: false, mode: null, theme: 'data_center',
                palette: 'data_center', layout: 'duo',
@@ -98,6 +160,7 @@ function freshState() {
                interval: 10.0 },
     galleryFiles: [],
     themesParam: '3',
+    animParam: null,
     krakenMode: null,
     apiCalls: [],
     thumbRequests: [],
@@ -112,7 +175,13 @@ function savedPayload(sticks) {
     colors,
     brightness: sticks[0] ? sticks[0].brightness : 255,
     stick_order: sticks.map((s) => `${s.bus_num}:0x${s.address.toString(16)}`),
-    animation: { speed: 1.0, framerate: 30, refresh: 20, enabled: false, type: 'static' },
+    // Schéma v4 : `lighting` canonique + miroir legacy `animation`.
+    // framerate=24 ≠ défaut front (30) : prouve que le front lit le status.
+    lighting: {
+      mode: 'static', running: false, speed: 1.0,
+      framerate: 24, refresh: 20, params: {},
+    },
+    animation: { speed: 1.0, framerate: 24, refresh: 20, enabled: false, type: 'static' },
     kraken: {
       lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
       display: { mode: null, theme: 'data_center',
@@ -230,13 +299,24 @@ async function handleApi(req, res, u) {
     S.saved = {
       colors, brightness: S.sticks[0] ? S.sticks[0].brightness : 255,
       stick_order: order,
-      animation: Object.assign({}, S.animation),
+      // Le mode ET l'état marche/arrêt font partie de la référence (option A) :
+      // `animation.enabled` MIRROITE `lighting.running` (plus de false forcé).
+      lighting: {
+        mode: S.animation.mode, running: S.animation.running,
+        speed: S.animation.speed, framerate: S.animation.framerate,
+        refresh: S.animation.refresh,
+        params: Object.assign({}, S.animation.params),
+      },
+      animation: {
+        speed: S.animation.speed, framerate: S.animation.framerate,
+        refresh: S.animation.refresh, enabled: S.animation.running,
+        type: S.animation.mode,
+      },
       kraken: {
         lcd: Object.assign({}, S.lcd),
         display: Object.assign({}, S.display),
       },
     };
-    S.saved.animation.enabled = false;
     return json(res, 200, { status: 'ok', reference: S.saved });
   }
   if (p === '/api/restore' && req.method === 'POST') {
@@ -245,33 +325,87 @@ async function handleApi(req, res, u) {
       if (S.saved.colors[s.id]) s.colors = S.saved.colors[s.id].map((c) => c.slice());
       s.brightness = S.saved.brightness;
     });
-    Object.assign(S.animation, S.saved.animation);
+    const light = S.saved.lighting || {
+      mode: 'static', running: false, speed: 1.0,
+      framerate: 30, refresh: 20, params: {},
+    };
+    S.animation.running = !!light.running && light.mode !== 'static';
+    S.animation.mode = light.mode || 'static';
+    S.animation.effect = S.animation.running ? S.animation.mode : null;
+    S.animation.speed = light.speed;
+    S.animation.framerate = light.framerate;
+    S.animation.refresh = light.refresh;
+    S.animation.params = Object.assign({}, light.params);
+    const restoredEffect = mockEffectById(S.animation.mode);
+    S.animation.cycle_seconds = (S.animation.running && restoredEffect)
+      ? mockCycle(restoredEffect, S.animation.params, S.animation.speed) : null;
     Object.assign(S.lcd, S.saved.kraken.lcd);
     Object.assign(S.display, S.saved.kraken.display);
     return json(res, 200, { status: 'ok', reference: S.saved });
   }
 
+  if (p === '/api/animation/effects' && req.method === 'GET') {
+    return json(res, 200, effectsForRequest());
+  }
   if (p === '/api/animation/status') return json(res, 200, S.animation);
   if (p === '/api/animation/start' && req.method === 'POST') {
-    S.animation.running = true;
-    S.animation.effect = body.effect || 'incandescence';
-    return json(res, 200, { status: 'ok', effect: S.animation.effect });
+    const mode = body.mode !== undefined ? body.mode
+      : (body.effect !== undefined ? body.effect : 'incandescence');
+    const effect = mockEffectById(mode);
+    // Mode inconnu : 400 SANS toucher au moteur courant (contrat backend).
+    if (mode !== 'static' && !effect) {
+      return json(res, 400, {
+        detail: `Mode d'animation inconnu: ${JSON.stringify(mode)}`,
+      });
+    }
+    if (mode === 'static') {
+      S.animation.running = false;
+      S.animation.mode = 'static';
+      S.animation.effect = null;
+      S.animation.params = {};
+      S.animation.cycle_seconds = null;
+    } else {
+      if (body.speed !== undefined) S.animation.speed = body.speed;
+      if (body.framerate !== undefined) S.animation.framerate = body.framerate;
+      if (body.refresh !== undefined) S.animation.refresh = body.refresh;
+      S.animation.running = true;
+      S.animation.mode = mode;
+      S.animation.effect = mode;
+      S.animation.params = normalizeMockParams(effect, body.params);
+      S.animation.cycle_seconds = mockCycle(
+        effect, S.animation.params, S.animation.speed);
+    }
+    return json(res, 200, Object.assign({ status: 'ok' }, S.animation));
   }
   if (p === '/api/animation/stop' && req.method === 'POST') {
     S.animation.running = false;
-    return json(res, 200, { status: 'ok' });
+    S.animation.mode = 'static';
+    S.animation.effect = null;
+    S.animation.params = {};
+    S.animation.cycle_seconds = null;
+    return json(res, 200, Object.assign({ status: 'ok' }, S.animation));
+  }
+  if (p === '/api/animation/update' && req.method === 'POST') {
+    if (body.speed !== undefined) S.animation.speed = body.speed;
+    if (body.framerate !== undefined) S.animation.framerate = body.framerate;
+    if (body.refresh !== undefined) S.animation.refresh = body.refresh;
+    const effect = mockEffectById(S.animation.mode);
+    S.animation.cycle_seconds = (S.animation.running && effect)
+      ? mockCycle(effect, S.animation.params, S.animation.speed) : null;
+    return json(res, 200, Object.assign({ status: 'ok' }, S.animation));
   }
   if (p === '/api/animation/speed' && req.method === 'POST') {
     S.animation.speed = body.speed;
+    const effect = mockEffectById(S.animation.mode);
+    if (S.animation.running && effect) {
+      S.animation.cycle_seconds = mockCycle(
+        effect, S.animation.params, S.animation.speed);
+    }
     return json(res, 200, { status: 'ok', speed: S.animation.speed });
   }
   if (p === '/api/animation/refresh' && req.method === 'POST') {
     S.animation.refresh = body.rate;
     return json(res, 200, { status: 'ok', rate: S.animation.refresh });
-  }
-
-  if (p === '/api/update/check') {
-    return json(res, 200, { current: '0.0.1', latest: '0.0.1', update_available: false });
   }
 
   if (p === '/api/kraken/status') {
@@ -462,6 +596,10 @@ function serveStatic(req, res, u) {
     // Mémorise le paramètre ?themes= pour /api/kraken/themes.
     const themesParam = u.searchParams.get('themes');
     if (themesParam) S.themesParam = themesParam;
+    // Mémorise ?anim=fake : ajoute un effet factice au catalogue pour
+    // prouver que le front gère proprement un 400 « mode inconnu ».
+    const animParam = u.searchParams.get('anim');
+    if (animParam) S.animParam = animParam;
     // Mémorise ?kraken=empty pour /api/kraken/status.
     const krakenParam = u.searchParams.get('kraken');
     if (krakenParam) S.krakenMode = krakenParam;

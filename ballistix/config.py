@@ -15,6 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .effects import MODE_IDS, normalize_params
+from .runner import clamp_framerate, clamp_refresh, clamp_speed
+
 CONFIG_DIR = Path.home() / ".config" / "ballistix"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 BACKUP_DIR = CONFIG_DIR / "backups"
@@ -26,7 +29,7 @@ MAX_BACKUPS = 5
 # matériel en temps réel ne touchent JAMAIS ce fichier tant qu'un Save
 # n'a pas été demandé.
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 3,
+    "version": 4,
     "metadata": {
         "created": None,  # Set on first save
         "updated": None,  # Set on each save
@@ -36,6 +39,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "manual_devices": [],  # [{"bus": int, "addr": int}, ...] pour --add-device
     "colors": {},          # {"stick_id": [[R,G,B], ...], ...}
     "brightness": 255,
+    # ── Section LUMIÈRE (canonique, schéma ≥ 4) ──────────────────
+    # Couche persistable de l'état d'éclairage : mode ("static" ou id
+    # d'effet), état marche/arrêt, réglages et paramètres d'effet. Les
+    # frames d'animation ne sont JAMAIS écrites ici (couche transitoire).
+    "lighting": {
+        "mode": "static",   # "static" | "incandescence" | "rainbow"
+        "running": False,    # moteur d'animation actif ?
+        "speed": 1.0,        # 0.1–10.0
+        "framerate": 30,     # 1–30 fps de rendu
+        "refresh": 20,       # 1–30 écritures SMBus/sec
+        "params": {},        # paramètres spécifiques à l'effet
+    },
+    # Ancienne section, conservée en MIROIR de rétrocompatibilité
+    # (schéma ≤ 3). La lecture est migrée vers `lighting` au chargement.
     "animation": {
         "type": "static",
         "enabled": False,
@@ -131,13 +148,74 @@ def load() -> dict:
     if not isinstance(merged.get("stick_order"), list):
         merged["stick_order"] = []
 
+    # Valider/borner la section lumière (défauts sains si absente/corrompue).
+    merged["lighting"] = normalize_lighting(merged.get("lighting"))
+
     return merged
+
+
+def lighting_from_animation(animation: Any) -> dict:
+    """Applique la RÈGLE DE MIGRATION ``animation`` → ``lighting`` (schéma ≤ 3 → 4).
+
+    Correspondances :
+      - ``type``      → ``mode``      (inconnu/absent → ``"static"``) ;
+      - ``enabled``   → ``running``   (forcé à False si le mode est ``static``,
+        qui n'a pas de moteur) ;
+      - ``speed``     → ``speed``     (défaut 1.0, borné 0.1–10.0) ;
+      - ``framerate`` → ``framerate`` (défaut 30, borné 1–30) ;
+      - ``refresh``   → ``refresh``   (défaut 20, borné 1–30) ;
+      - ``params``    → ``params``    (dict, défaut {}).
+
+    La section ``animation`` d'origine n'est PAS supprimée : elle reste un
+    miroir de rétrocompatibilité (le temps de migration du front).
+    """
+    src = animation if isinstance(animation, dict) else {}
+    mode = src.get("type", "static")
+    if not isinstance(mode, str) or mode not in MODE_IDS:
+        mode = "static"
+    running = bool(src.get("enabled", False)) and mode != "static"
+    params = src.get("params") if isinstance(src.get("params"), dict) else {}
+    return {
+        "mode": mode,
+        "running": running,
+        "speed": clamp_speed(src.get("speed", 1.0)),
+        "framerate": clamp_framerate(src.get("framerate", 30)),
+        "refresh": clamp_refresh(src.get("refresh", 20)),
+        "params": dict(params),
+    }
+
+
+def normalize_lighting(section: Any) -> dict:
+    """Valide/borne une section ``lighting`` (ne lève jamais).
+
+    Garantit les clés et types du schéma courant : mode connu (sinon
+    ``"static"``), ``running`` forcé à False pour ``static``, réglages
+    bornés et paramètres d'effet complétés par leurs défauts.
+    """
+    src = section if isinstance(section, dict) else {}
+    mode = src.get("mode", "static")
+    if not isinstance(mode, str) or mode not in MODE_IDS:
+        mode = "static"
+    running = bool(src.get("running", False)) and mode != "static"
+    params = src.get("params") if isinstance(src.get("params"), dict) else {}
+    params = {} if mode == "static" else normalize_params(mode, params)
+    return {
+        "mode": mode,
+        "running": running,
+        "speed": clamp_speed(src.get("speed", 1.0)),
+        "framerate": clamp_framerate(src.get("framerate", 30)),
+        "refresh": clamp_refresh(src.get("refresh", 20)),
+        "params": params,
+    }
 
 
 def _migrate_config(config: dict) -> None:
     """Migre en place un ``config.json`` ancien vers le schéma courant.
 
-    Règle retenue (documentée) :
+    Règles retenues (documentées) :
+      - ancien ``animation`` présent et ``lighting`` absent → construction
+        de ``lighting`` par :func:`lighting_from_animation` (``type``→``mode``,
+        ``enabled``→``running``, bornes saines sur speed/framerate/refresh) ;
       - ancien ``kraken.display.theme`` présent et ``palette`` absent →
         ``palette = theme`` (mêmes couleurs) et ``layout = "classic"``,
         afin de préserver EXACTEMENT le rendu des installations existantes ;
@@ -148,6 +226,13 @@ def _migrate_config(config: dict) -> None:
     """
     if not isinstance(config, dict):
         return
+
+    # 1. Lighting ← animation (indépendant de la présence de `kraken`).
+    if not isinstance(config.get("lighting"), dict) or not config.get("lighting"):
+        if isinstance(config.get("animation"), dict):
+            config["lighting"] = lighting_from_animation(config["animation"])
+
+    # 2. Kraken : theme ↔ palette.
     kraken = config.get("kraken")
     if not isinstance(kraken, dict):
         return
@@ -286,15 +371,6 @@ def save_stick_order(order: List[str]) -> None:
     save(config)
 
 
-def save_animation(settings: dict) -> None:
-    """Sauvegarde la section ``animation`` (speed/framerate/refresh…)."""
-    config = load()
-    merged = dict(config.get("animation") or {})
-    merged.update(settings)
-    config["animation"] = merged
-    save(config)
-
-
 def save_kraken(settings: dict) -> None:
     """Sauvegarde la section ``kraken`` (lcd/display), fusion partielle."""
     config = load()
@@ -341,12 +417,13 @@ __all__ = [
     "ensure_dirs",
     "load",
     "save",
+    "normalize_lighting",
+    "lighting_from_animation",
     "add_manual_device",
     "remove_manual_device",
     "save_colors",
     "save_brightness",
     "save_stick_order",
-    "save_animation",
     "save_kraken",
     "save_ui_prefs",
     "get_config_path",

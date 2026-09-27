@@ -337,21 +337,6 @@ body {
 .badge.err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-soft); }
 .badge b { color: var(--accent); font-weight: 700; }
 
-/* Badge de mise à jour disponible (injecté côté serveur si présent) */
-.update-badge {
-  display: inline-flex; align-items: center;
-  font-size: .7rem; background: var(--ok-soft); color: var(--ok);
-  padding: 2px 8px; border-radius: 10px; margin-left: .5rem;
-  border: 1px solid var(--ok-brd);
-}
-.update-badge.available {
-  background: var(--danger-soft);
-  color: var(--warn);
-  border-color: var(--brd);
-  animation: pulse-update 2s ease-in-out infinite;
-}
-@keyframes pulse-update { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
-
 /* ── Sélecteur de pack d'interface (header) ─────────────── */
 .ui-theme {
   display: flex; align-items: center; gap: 7px;
@@ -501,6 +486,33 @@ body {
 /* ── Animation ──────────────────────────────────────────── */
 .anim-grid { display: flex; gap: 7px; flex-wrap: wrap; }
 .anim-grid .btn { flex: 1; justify-content: center; min-width: 0; }
+/* Mode d'animation ACTIF : le backend hot-swappe, les boutons ne sont donc
+   jamais désactivés ; l'état se lit au contour + pastille + aria-pressed. */
+.anim-mode-btn { position: relative; }
+.anim-mode-btn[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: 0 0 12px var(--accent-soft), inset 0 0 0 1px var(--accent);
+  filter: saturate(1.15) brightness(1.08);
+}
+.anim-mode-btn[aria-pressed="true"]::after {
+  content: '';
+  position: absolute; top: 4px; right: 6px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+.anim-cycle {
+  margin-top: 5px; font-family: var(--mono); font-size: 11px; color: var(--dim);
+}
+.anim-params {
+  margin-top: 11px; padding-top: 8px; border-top: 1px dashed var(--brd);
+}
+.anim-params summary {
+  cursor: pointer; user-select: none; font-size: 11.5px; color: var(--dim);
+}
+.anim-params summary:hover { color: var(--text); }
+.anim-params .slider-row { margin-top: 9px; }
 
 /* ── Sliders ────────────────────────────────────────────── */
 .slider-row { margin-top: 11px; }

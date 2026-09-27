@@ -28,12 +28,24 @@ const state = {
   /** @type {number} */
   brightness: 255,
 
-  /** @type {boolean} Animation matrice en cours — suspend le diff des couleurs
-      (pendant une animation, chaque frame WebSocket réécrit state.colors). */
-  animationRunning: false,
+  /** @type {Object<string, Array<[number,number,number]>>} Couleurs de BASE
+      (couche persistable). Les frames d'animation ne réécrivent QUE
+      state.colors ; la couche base reste éditable et comparable à la
+      référence, même moteur en marche. */
+  baseColors: {},
 
-  /** @type {string|null} Effet d'animation courant. */
-  animationEffect: null,
+  /** @type {{mode:string, running:boolean, speed:number, framerate:number,
+             refresh:number, params:Object}} État lumière courant (miroir de
+      GET /api/animation/status). Source unique du dirty « éclairage ». */
+  lighting: {
+    mode: 'static', running: false, speed: 1.0,
+    framerate: 30, refresh: 20, params: {},
+  },
+
+  /** @type {Array<{id:string,label:string,params:Array<Object>}>}
+      Catalogue des effets (GET /api/animation/effects) — l'UI ne code
+      plus les modes en dur. */
+  effects: [],
 
   /** @private Listeners internes */
   _listeners: {},
@@ -171,9 +183,11 @@ async function handleFallback(msg) {
       case 'set_led': {
         const stick = state.sticks.find(s => s.id === msg.stick_id);
         if (!stick) return;
-        const colors = state.colors[msg.stick_id] || [];
-        colors[msg.led_idx] = msg.color;
-        state.colors[msg.stick_id] = colors;
+        const colors = (state.baseColors[msg.stick_id]
+          || state.colors[msg.stick_id] || []).map((c) => c.slice());
+        colors[msg.led_idx] = msg.color.slice();
+        state.baseColors[msg.stick_id] = colors;
+        state.colors[msg.stick_id] = colors.map((c) => c.slice());
         await apiPutColors(msg.stick_id, colors);
         state.notify();
         break;
@@ -181,8 +195,9 @@ async function handleFallback(msg) {
       case 'set_all_leds': {
         const stick = state.sticks.find(s => s.id === msg.stick_id);
         if (!stick) return;
-        const colors = Array(stick.num_leds).fill(null).map(() => msg.color);
-        state.colors[msg.stick_id] = colors;
+        const colors = Array(stick.num_leds).fill(null).map(() => msg.color.slice());
+        state.baseColors[msg.stick_id] = colors;
+        state.colors[msg.stick_id] = colors.map((c) => c.slice());
         await apiPutColors(msg.stick_id, colors);
         state.notify();
         break;
@@ -413,7 +428,9 @@ function handleWSMessage(data) {
 
     case 'color_applied': {
       if (data.leds && data.stick_id) {
-        state.colors[data.stick_id] = data.leds;
+        const base = data.leds.map((c) => [Number(c[0]) || 0, Number(c[1]) || 0, Number(c[2]) || 0]);
+        state.baseColors[data.stick_id] = base;
+        state.colors[data.stick_id] = base.map((c) => c.slice());
         state.emit('colors');
         // Mettre à jour le brightness du stick
         const stick = state.sticks.find(s => s.id === data.stick_id);
@@ -461,11 +478,12 @@ function handleWSMessage(data) {
         state.sticks = newSticksList;
       }
       
-      // Nettoyer les couleurs des sticks disparus
+      // Nettoyer les couleurs des sticks disparus (les deux couches)
       const newIds = new Set(state.sticks.map(s => s.id));
       for (const sid of Object.keys(state.colors)) {
         if (!newIds.has(sid)) {
           delete state.colors[sid];
+          delete state.baseColors[sid];
         }
       }
 
@@ -499,10 +517,9 @@ function handleWSMessage(data) {
       break;
 
     case 'animation_frame':
-      // Bug 1 : Mettre à jour le canvas avec les couleurs de l'animation
+      // Couche transitoire : les frames n'écrivent QUE l'affichage.
+      // L'état marche/arrêt vient de animation_started/stopped/status.
       if (data.colors) {
-        // Des frames arrivent → le moteur tourne forcément
-        state.animationRunning = true;
         for (const [stickId, leds] of Object.entries(data.colors)) {
           state.colors[stickId] = leds;
         }
@@ -511,17 +528,24 @@ function handleWSMessage(data) {
       break;
 
     case 'animation_started': {
-      state.animationRunning = true;
-      state.animationEffect = data.effect || null;
-      updateAnimationButtons();
+      applyLightingStatus({ ...data, running: true });
+      refreshAnimationUI();
+      scheduleDirtyUpdate();
+      refreshAnimationState();
+      break;
+    }
+
+    case 'animation_update': {
+      applyLightingStatus(data);
+      refreshAnimationUI();
       scheduleDirtyUpdate();
       break;
     }
 
     case 'animation_stopped': {
-      state.animationRunning = false;
-      state.animationEffect = null;
-      updateAnimationButtons();
+      applyLightingStatus({ ...data, running: false, mode: 'static' });
+      syncDisplayToBaseColors();
+      refreshAnimationUI();
       scheduleDirtyUpdate();
       break;
     }
@@ -605,7 +629,9 @@ async function fetchStickInfo(stickId) {
   try {
     const data = await apiFetch(`/sticks/${stickId}`);
     if (data.colors) {
-      state.colors[stickId] = data.colors;
+      const base = data.colors.map((c) => [Number(c[0]) || 0, Number(c[1]) || 0, Number(c[2]) || 0]);
+      state.baseColors[stickId] = base;
+      state.colors[stickId] = base.map((c) => c.slice());
       state.emit('colors');
     }
     return data;
@@ -661,120 +687,6 @@ async function apiRescan() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Auto-Update (brique HolafModal)
-   ═══════════════════════════════════════════════════════════ */
-
-/**
- * Tente de se reconnecter au serveur après une mise à jour.
- * Met à jour le message du bus modal puis recharge la page quand la
- * connexion est rétablie.
- * @param {{set:Function,close:Function}|null} busy - contrôleur HolafModal.busy
- * @param {number} maxAttempts - nombre max de tentatives
- * @param {number} interval - ms entre les tentatives
- */
-function reconnectAfterUpdate(busy = null, maxAttempts = 30, interval = 2000) {
-  let attempts = 0;
-
-  async function tryReconnect() {
-    attempts++;
-    console.log(`🔁 Tentative de reconnexion ${attempts}/${maxAttempts}...`);
-    try {
-      // retry:null → échec rapide, la boucle gère les tentatives.
-      await apiFetch('/status', { timeout: 3000, retry: null });
-      console.log('✅ Serveur de nouveau accessible ! Rechargement...');
-      if (busy) busy.set('Serveur reconnecté ! Rechargement de la page...');
-      setTimeout(() => window.location.reload(), 1500);
-    } catch (_) {
-      if (attempts < maxAttempts) {
-        setTimeout(tryReconnect, interval);
-      } else if (busy) {
-        busy.close();
-        window.HolafModal.alert(
-          '⬇ Mise à jour',
-          'Le serveur ne répond pas après plusieurs tentatives. Rechargez la page manuellement.',
-          { theme: MODAL_THEME }
-        );
-      }
-    }
-  }
-
-  setTimeout(tryReconnect, interval);
-}
-
-/**
- * Lance le processus de mise à jour complet (vérification, confirmation,
- * installation, reconnexion) via HolafModal.busy / confirm / alert.
- */
-async function performUpdate() {
-  // ── Étape 1 : vérification de la version ──
-  const busy = window.HolafModal.busy('Vérification de la version...');
-
-  let checkData;
-  try {
-    checkData = await apiFetch('/update/check', { timeout: 15000 });
-  } catch (err) {
-    busy.close();
-    await window.HolafModal.alert(
-      '⬇ Mise à jour',
-      'Échec de la vérification : ' + err.message,
-      { theme: MODAL_THEME }
-    );
-    return;
-  }
-  busy.close();
-
-  if (!checkData.update_available) {
-    toast('✅ Déjà à jour (v' + checkData.current + ')', 'success');
-    return;
-  }
-
-  // ── Demande de confirmation ──
-  const confirmed = await window.HolafModal.confirm(
-    '⬇ Mise à jour disponible',
-    `Version actuelle : v${checkData.current} — Nouvelle version : v${checkData.latest}. ` +
-      `Le service va être redémarré. Continuer ?`,
-    { confirmText: 'Mettre à jour', cancelText: 'Annuler', theme: MODAL_THEME }
-  );
-  if (!confirmed) {
-    toast('Mise à jour annulée', 'info');
-    return;
-  }
-
-  // ── Étape 2 : téléchargement + installation ──
-  const installing = window.HolafModal.busy('Téléchargement de la mise à jour...');
-
-  let updateData;
-  try {
-    // retry:null + timeout large : opération non idempotente, upload potentiel.
-    updateData = await apiFetch('/update', { method: 'POST', timeout: 120000, retry: null });
-  } catch (err) {
-    installing.close();
-    await window.HolafModal.alert(
-      '⬇ Mise à jour',
-      'Échec de la mise à jour : ' + err.message,
-      { theme: MODAL_THEME }
-    );
-    return;
-  }
-
-  // ── Cas : déjà à jour (le serveur peut le détecter aussi) ──
-  if (updateData.status === 'up-to-date') {
-    installing.close();
-    toast('✅ Déjà à jour (v' + updateData.current + ')', 'success');
-    return;
-  }
-
-  // ── Étape 3 : installation réussie, redémarrage ──
-  installing.set('Installation du binaire...');
-  installing.set('Redémarrage du service...');
-
-  // ── Étape 4 : reconnexion ──
-  installing.set('Reconnexion au serveur...');
-  toast('✅ Mise à jour installée. Reconnexion...', 'success');
-  reconnectAfterUpdate(installing);
-}
-
-/* ═══════════════════════════════════════════════════════════
    Kraken NZXT
    ═══════════════════════════════════════════════════════════ */
 
@@ -802,7 +714,7 @@ function appendKrakenStatusDiagnostic(el, data) {
     el.innerHTML += `
       <div class="kraken-status-error">
         ⚠ <strong>Statut illisible :</strong> ${escapeHtml(String(cause))}<br>
-        Diagnostic sur la machine : <code>liquidctl --match Kraken status</code>
+        Diagnostic dans le container qui exécute BxRGB : <code>liquidctl --match Kraken status</code>
       </div>`;
     if (typeof data.status_raw === 'string' && data.status_raw.trim()) {
       el.innerHTML += `
@@ -1612,13 +1524,16 @@ function escapeHtml(str) {
    Moteur « dirty » + barre Enregistrer / Annuler
    ────────────────────────────────────────────────────────────
    RÉFÉRENCE = état figé côté serveur (GET /api/saved) : couleurs
-   par stick, luminosité, ordre, animation (speed/refresh) et
-   réglages Kraken (lcd + display). L'écart courant ↔ référence est
+   de base par stick, luminosité, ordre, section `lighting`
+   (mode/running/speed/framerate/refresh/params) et réglages
+   Kraken (lcd + display). L'écart courant ↔ référence est
    recalculé (throttlé) à chaque mutation et rendu dans le footer.
 
-   Pendant une animation, les frames WebSocket réécrivent
-   state.colors en boucle : le diff des COULEURS est suspendu tant
-   que le moteur tourne, sinon le dirty serait permanent.
+   Les frames d'animation n'écrivent QUE state.colors (affichage) :
+   state.baseColors reste la couche persistable, donc les couleurs
+   éditées PENDANT une animation sont comparées normalement et le
+   dirty ne devient jamais permanent. Le mode et l'état marche/arrêt
+   de l'éclairage font partie de la référence (décision A).
    ═══════════════════════════════════════════════════════════ */
 
 /** Référence normalisée (GET /api/saved), ou null tant que non chargée. */
@@ -1649,18 +1564,32 @@ function normalizeReference(ref) {
     }
   });
   const anim = (ref && ref.animation) || {};
+  const light = (ref && ref.lighting) || {};
   const krakenRef = (ref && ref.kraken) || {};
   const lcd = krakenRef.lcd || {};
   const display = krakenRef.display || {};
+  // Schéma v4 (`lighting`) avec repli sur le miroir legacy (`animation` :
+  // type→mode, enabled→running) pour les références pas encore migrées.
+  const refMode = typeof light.mode === 'string' ? light.mode
+    : (typeof anim.type === 'string' ? anim.type : 'static');
+  const refRunning = light.running !== undefined ? !!light.running
+    : !!anim.enabled;
   return {
     colors,
     brightness: Number(ref && ref.brightness !== undefined ? ref.brightness : 255),
     stick_order: Array.isArray(ref && ref.stick_order)
       ? ref.stick_order.map(String) : [],
-    animation: {
-      speed: Number(anim.speed !== undefined ? anim.speed : 1),
-      framerate: Number(anim.framerate !== undefined ? anim.framerate : 30),
-      refresh: Number(anim.refresh !== undefined ? anim.refresh : 20),
+    lighting: {
+      mode: refMode === 'static' ? 'static' : refMode,
+      running: refMode !== 'static' && refRunning,
+      speed: Number(light.speed !== undefined ? light.speed
+        : (anim.speed !== undefined ? anim.speed : 1)),
+      framerate: Number(light.framerate !== undefined ? light.framerate
+        : (anim.framerate !== undefined ? anim.framerate : 30)),
+      refresh: Number(light.refresh !== undefined ? light.refresh
+        : (anim.refresh !== undefined ? anim.refresh : 20)),
+      params: (light.params && typeof light.params === 'object')
+        ? { ...light.params } : {},
     },
     kraken: {
       lcd: {
@@ -1724,17 +1653,15 @@ function computeDirtyItems() {
   const ref = savedReference;
   const items = [];
 
-  // 1. Couleurs (suspendu pendant une animation — frames en boucle)
-  if (!state.animationRunning) {
-    state.sticks.forEach((stick, idx) => {
-      const fresh = state.colors[stick.id];
-      const saved = ref.colors[stick.id];
-      if (!fresh || !saved) return; // non chargé / hors référence → neutre
-      if (!sameColorList(fresh, saved)) {
-        items.push(`Couleurs — Barrette #${idx + 1}`);
-      }
-    });
-  }
+  // 1. Couleurs de BASE (jamais les frames : voir state.baseColors)
+  state.sticks.forEach((stick, idx) => {
+    const fresh = state.baseColors[stick.id] || state.colors[stick.id];
+    const saved = ref.colors[stick.id];
+    if (!fresh || !saved) return; // non chargé / hors référence → neutre
+    if (!sameColorList(fresh, saved)) {
+      items.push(`Couleurs — Barrette #${idx + 1}`);
+    }
+  });
 
   // 2. Luminosité (globale)
   if (Number(state.brightness) !== ref.brightness) {
@@ -1748,20 +1675,41 @@ function computeDirtyItems() {
     if (current !== saved) items.push('Ordre des barrettes');
   }
 
-  // 4. Animation (speed / refresh)
-  const speedEl = document.getElementById('anim-speed');
-  const refreshEl = document.getElementById('anim-refresh');
-  if (speedEl) {
-    const v = parseFloat(speedEl.value);
-    if (Math.abs(v - ref.animation.speed) > 1e-9) {
-      items.push(`Vitesse d'animation : ${ref.animation.speed}× → ${v}×`);
+  // 4. Éclairage : mode, état marche/arrêt, réglages (décision A)
+  const refLight = ref.lighting;
+  const curLight = state.lighting;
+  if (refLight.mode !== curLight.mode) {
+    let label = `Éclairage : ${lightingModeLabel(refLight.mode)} → `
+      + lightingModeLabel(curLight.mode);
+    if (refLight.running !== curLight.running) {
+      label += curLight.running ? ' (en marche)' : ' (arrêté)';
     }
+    items.push(label);
+  } else if (refLight.running !== curLight.running) {
+    items.push('Éclairage : ' + (refLight.running ? 'en marche' : 'arrêté')
+      + ' → ' + (curLight.running ? 'en marche' : 'arrêté'));
   }
-  if (refreshEl) {
-    const v = parseInt(refreshEl.value, 10);
-    if (v !== ref.animation.refresh) {
-      items.push(`Refresh SMBus : ${ref.animation.refresh} → ${v}/s`);
-    }
+  if (Math.abs(curLight.speed - refLight.speed) > 1e-9) {
+    items.push(`Vitesse d'animation : ${refLight.speed}× → ${curLight.speed}×`);
+  }
+  if (Math.round(curLight.refresh) !== Math.round(refLight.refresh)) {
+    items.push(`Refresh SMBus : ${refLight.refresh} → ${curLight.refresh}/s`);
+  }
+  if (Math.round(curLight.framerate) !== Math.round(refLight.framerate)) {
+    items.push(`Cadence d'animation : ${refLight.framerate} → ${curLight.framerate} fps`);
+  }
+  if (curLight.mode === refLight.mode && curLight.mode !== 'static') {
+    const keys = new Set([
+      ...Object.keys(refLight.params || {}),
+      ...Object.keys(curLight.params || {}),
+    ]);
+    let paramsDiffer = false;
+    keys.forEach((key) => {
+      const a = Number(curLight.params ? curLight.params[key] : NaN);
+      const b = Number(refLight.params ? refLight.params[key] : NaN);
+      if (!(a === b || (Number.isNaN(a) && Number.isNaN(b)))) paramsDiffer = true;
+    });
+    if (paramsDiffer) items.push(`Réglages de ${lightingModeLabel(curLight.mode)}`);
   }
 
   // 5. Kraken — écran LCD
@@ -1864,10 +1812,22 @@ function renderDirtyUI() {
   }
 }
 
-/** Charge la référence persistée (GET /api/saved). */
-async function loadSavedReference() {
+/** Libellé lisible d'un mode d'éclairage (registre serveur, repli id). */
+function lightingModeLabel(mode) {
+  if (!mode || mode === 'static') return 'Statique';
+  const effect = state.effects.find((e) => e.id === mode);
+  return effect ? effect.label : mode;
+}
+
+/** Charge la référence persistée (GET /api/saved).
+ * @param {{adoptLighting?: boolean}} [opts] — adoptLighting : recopie la
+ *   section lighting de la référence dans l'état courant (boot uniquement,
+ *   pour éviter un faux dirty avant le retour de /animation/status).
+ */
+async function loadSavedReference(opts = {}) {
   try {
     savedReference = normalizeReference(await apiFetch('/saved'));
+    if (opts.adoptLighting) adoptReferenceLighting();
   } catch (err) {
     console.warn('[dirty] référence non chargée :', err);
     savedReference = null;
@@ -1932,37 +1892,379 @@ async function hydrateKrakenControls() {
   } catch (err) { /* silencieux */ }
 }
 
-/** Réhydrate l'état animation (running + sliders) depuis le serveur. */
+/* ═══════════════════════════════════════════════════════════
+   Sous-système « lighting » côté front
+   ────────────────────────────────────────────────────────────
+   state.lighting est le miroir de GET /api/animation/status ;
+   le catalogue des modes vient de GET /api/animation/effects
+   (aucun mode codé en dur ici). Le backend hot-swappe : les
+   boutons de mode ne sont JAMAIS désactivés en marche. Le
+   framerate n'est plus codé en dur : il vient du status.
+   ═══════════════════════════════════════════════════════════ */
+
+/** Marge de débounce des réglages à chaud (cohérente avec Kraken : 400 ms). */
+const ANIM_APPLY_DELAY_MS = 400;
+
+/** Durée de cycle de base (indépendante de la vitesse) : permet d'afficher
+    la durée de cycle immédiatement pendant le drag, avant la réponse serveur. */
+let animCycleBase = null;
+/** Timers de débounce (vitesse/refresh ; paramètres d'effet). */
+let animSettingsTimer = null;
+let animParamsTimer = null;
+
+/** Mode matrice (vue canvas) — implémentation branchée à l'init DOM. */
+let matrixMode = false;
+let setMatrixMode = function (on) { matrixMode = !!on; };
+
+/** Applique (partiellement) un payload de statut au miroir local. */
+function applyLightingStatus(data) {
+  const d = data || {};
+  const mode = typeof d.mode === 'string' ? d.mode
+    : (typeof d.effect === 'string' && d.effect ? d.effect : state.lighting.mode);
+  const running = d.running !== undefined ? !!d.running
+    : (mode !== 'static' && state.lighting.running);
+  state.lighting = {
+    mode: mode,
+    running: mode !== 'static' && running,
+    speed: d.speed !== undefined && d.speed !== null
+      ? Number(d.speed) : state.lighting.speed,
+    framerate: d.framerate !== undefined && d.framerate !== null
+      ? Number(d.framerate) : state.lighting.framerate,
+    refresh: d.refresh !== undefined && d.refresh !== null
+      ? Number(d.refresh) : state.lighting.refresh,
+    params: (d.params && typeof d.params === 'object')
+      ? { ...d.params } : state.lighting.params,
+  };
+  if (d.cycle_seconds !== undefined) {
+    animCycleBase = (d.cycle_seconds === null)
+      ? null : Number(d.cycle_seconds) * state.lighting.speed;
+  }
+}
+
+/** Reflète state.lighting dans tous les contrôles d'animation. */
+function refreshAnimationUI() {
+  updateAnimationSliders();
+  updateAnimationButtons();
+  renderAnimationParams();
+}
+
+/** Positionne les sliders + libellés + durée de cycle sur l'état courant. */
+function updateAnimationSliders() {
+  const speed = Number(state.lighting.speed);
+  const speedEl = document.getElementById('anim-speed');
+  if (speedEl && isFinite(speed)) speedEl.value = String(speed);
+  const speedLabel = document.getElementById('anim-speed-value');
+  if (speedLabel && isFinite(speed)) speedLabel.textContent = speed.toFixed(1) + '×';
+  const refresh = Number(state.lighting.refresh);
+  const refreshEl = document.getElementById('anim-refresh');
+  if (refreshEl && isFinite(refresh)) refreshEl.value = String(refresh);
+  const refreshLabel = document.getElementById('anim-refresh-value');
+  if (refreshLabel && isFinite(refresh)) refreshLabel.textContent = Math.round(refresh) + '/s';
+  updateAnimationCycleLabel();
+}
+
+/** Affiche la durée de cycle réelle (« cycle ≈ 3,3 s ») ou « — ». */
+function updateAnimationCycleLabel() {
+  const el = document.getElementById('anim-cycle');
+  if (!el) return;
+  if (!state.lighting.running || animCycleBase === null || !isFinite(animCycleBase)) {
+    el.textContent = 'cycle ≈ —';
+    return;
+  }
+  const real = animCycleBase / Math.max(state.lighting.speed, 1e-6);
+  el.textContent = 'cycle ≈ ' + real.toFixed(1).replace('.', ',') + ' s';
+}
+
+/** Réhydrate l'état lumière complet depuis le serveur + met à jour l'UI.
+    (Après un F5 le boot serveur a rechargé `lighting` : pas de faux dirty.) */
 async function refreshAnimationState() {
   try {
     const data = await apiFetch('/animation/status');
-    state.animationRunning = !!data.running;
-    state.animationEffect = data.effect || null;
-    const speedEl = document.getElementById('anim-speed');
-    if (speedEl && data.speed !== undefined && data.speed !== null) {
-      speedEl.value = data.speed;
-      const label = document.getElementById('anim-speed-value');
-      if (label) label.textContent = Number(data.speed).toFixed(2) + '×';
-    }
-    const refreshEl = document.getElementById('anim-refresh');
-    if (refreshEl && data.refresh !== undefined && data.refresh !== null) {
-      refreshEl.value = data.refresh;
-      const label = document.getElementById('anim-refresh-value');
-      if (label) label.textContent = Math.round(Number(data.refresh)) + '/s';
-    }
-  } catch (err) { /* silencieux */ }
+    applyLightingStatus(data);
+    if (state.lighting.running) setMatrixMode(true);
+    refreshAnimationUI();
+    scheduleDirtyUpdate();
+  } catch (err) { /* silencieux : UI laissée dans son état connu */ }
   updateAnimationButtons();
 }
 
-/** Répercute l'état d'animation sur les boutons Démarrer / Arrêter. */
+/** Répercute l'état sur les boutons de mode et le bouton Stop.
+    Les boutons de mode ne sont JAMAIS désactivés (hot-swap backend) :
+    le mode courant porte .active + aria-pressed. */
 function updateAnimationButtons() {
-  const running = !!state.animationRunning;
-  const startBtn = document.getElementById('btn-anim-start');
-  const rainbowBtn = document.getElementById('btn-anim-rainbow');
+  const running = !!state.lighting.running;
+  const mode = state.lighting.mode;
+  document.querySelectorAll('.anim-mode-btn').forEach((btn) => {
+    const active = running && btn.dataset.mode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
   const stopBtn = document.getElementById('btn-anim-stop');
-  if (startBtn) startBtn.disabled = running;
-  if (rainbowBtn) rainbowBtn.disabled = running;
   if (stopBtn) stopBtn.disabled = !running;
+}
+
+/** Peuple #anim-modes depuis le catalogue serveur (libellés inclus). */
+function renderAnimationModes() {
+  const host = document.getElementById('anim-modes');
+  const hint = document.getElementById('anim-modes-hint');
+  if (!host) return;
+  host.innerHTML = '';
+  state.effects.forEach((effect) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'anim-mode-' + effect.id;
+    btn.className = 'btn btn-primary anim-mode-btn';
+    btn.dataset.mode = effect.id;
+    btn.setAttribute('aria-pressed', 'false');
+    btn.textContent = effect.label;
+    btn.title = 'Démarrer / basculer sur « ' + effect.label
+      + ' » à chaud (sans arrêter l\'animation en cours)';
+    btn.addEventListener('click', () => startAnimation(effect.id));
+    host.appendChild(btn);
+  });
+  if (hint) hint.classList.toggle('hidden', state.effects.length > 0);
+  updateAnimationButtons();
+}
+
+/** Charge le catalogue d'effets (source unique de l'UI). */
+async function loadAnimationEffects() {
+  try {
+    const list = await apiFetch('/animation/effects');
+    if (Array.isArray(list)) state.effects = list;
+  } catch (err) {
+    console.warn('[animation] catalogue indisponible :', err);
+  }
+  renderAnimationModes();
+}
+
+/** Adopte la section lighting de la référence (boot uniquement) : évite un
+    faux dirty le temps que /animation/status réponde. */
+function adoptReferenceLighting() {
+  if (!savedReference) return;
+  state.lighting = {
+    ...savedReference.lighting,
+    params: { ...savedReference.lighting.params },
+  };
+  animCycleBase = null;
+  refreshAnimationUI();
+}
+
+/** Miroir d'affichage au repos : les frames ne polluent pas baseColors. */
+function syncDisplayToBaseColors() {
+  let changed = false;
+  for (const stick of state.sticks) {
+    const base = state.baseColors[stick.id];
+    if (base) {
+      state.colors[stick.id] = base.map((c) => c.slice());
+      changed = true;
+    } else {
+      fetchStickInfo(stick.id);
+    }
+  }
+  if (changed) state.emit('colors');
+}
+
+/** Applique À CHAUD vitesse + refresh (POST /api/animation/update), débouncé. */
+function scheduleAnimationSettings() {
+  if (animSettingsTimer) clearTimeout(animSettingsTimer);
+  animSettingsTimer = setTimeout(flushAnimationSettings, ANIM_APPLY_DELAY_MS);
+}
+
+async function flushAnimationSettings() {
+  if (animSettingsTimer) {
+    clearTimeout(animSettingsTimer);
+    animSettingsTimer = null;
+  }
+  try {
+    const data = await apiFetch('/animation/update', {
+      method: 'POST',
+      body: { speed: state.lighting.speed, refresh: state.lighting.refresh },
+    });
+    applyLightingStatus(data);
+    refreshAnimationUI();
+    scheduleDirtyUpdate();
+  } catch (err) {
+    // Silencieux : le prochain /start ou /update reprendra les valeurs de l'UI.
+  }
+}
+
+/** Applique les paramètres d'effet (hot-swap /start, phase réinitialisée). */
+function scheduleAnimationParams() {
+  if (animParamsTimer) clearTimeout(animParamsTimer);
+  animParamsTimer = setTimeout(flushAnimationParams, ANIM_APPLY_DELAY_MS);
+}
+
+async function flushAnimationParams() {
+  if (animParamsTimer) {
+    clearTimeout(animParamsTimer);
+    animParamsTimer = null;
+  }
+  if (!state.lighting.running || state.lighting.mode === 'static') return;
+  try {
+    const data = await apiFetch('/animation/start', {
+      method: 'POST',
+      body: {
+        mode: state.lighting.mode,
+        params: state.lighting.params,
+        speed: state.lighting.speed,
+        framerate: state.lighting.framerate,
+        refresh: state.lighting.refresh,
+      },
+    });
+    applyLightingStatus(data);
+    refreshAnimationUI();
+    scheduleDirtyUpdate();
+  } catch (err) {
+    handleAnimationError(err);
+  }
+}
+
+/** Toast clair pour une erreur 400 (mode inconnu : état inchangé). */
+function handleAnimationError(err) {
+  if (err && err.status === 400) {
+    const detail = (err.data && err.data.detail) || err.message || 'mode inconnu';
+    toast('⚠ Mode d\'animation refusé : ' + detail, 'error');
+    refreshAnimationState(); // l'état serveur n'a pas bougé → resynchroniser
+  } else {
+    toast('⚠ Erreur animation : ' + (err && err.message ? err.message : err), 'error');
+  }
+}
+
+/** Démarre — ou BASCULE À CHAUD vers — un mode (POST /api/animation/start).
+    Aucun Stop préalable : le backend hot-swappe. 400 → état inchangé. */
+async function startAnimation(mode) {
+  const effect = state.effects.find((e) => e.id === mode);
+  const label = effect ? effect.label : mode;
+  // Un /start annule les applications débouncées en attente (pas de course).
+  if (animSettingsTimer) { clearTimeout(animSettingsTimer); animSettingsTimer = null; }
+  if (animParamsTimer) { clearTimeout(animParamsTimer); animParamsTimer = null; }
+  try {
+    const data = await apiFetch('/animation/start', {
+      method: 'POST',
+      body: {
+        mode: mode,
+        params: state.lighting.params,
+        speed: state.lighting.speed,
+        framerate: state.lighting.framerate,
+        refresh: state.lighting.refresh,
+      },
+    });
+    // Les animations se regardent en vue matrice (visuel canvas uniquement).
+    setMatrixMode(true);
+    applyLightingStatus(data);
+    refreshAnimationUI();
+    scheduleDirtyUpdate();
+    toast('🎬 ' + label + ' ' + (data.running ? 'en marche' : 'appliqué'), 'success');
+  } catch (err) {
+    handleAnimationError(err);
+  }
+}
+
+/** Arrête réellement l'animation (retour aux couleurs de base). */
+async function stopAnimation() {
+  try {
+    const data = await apiFetch('/animation/stop', { method: 'POST' });
+    applyLightingStatus({ ...data, running: false, mode: 'static' });
+    syncDisplayToBaseColors();
+    refreshAnimationUI();
+    scheduleDirtyUpdate();
+    toast('⏹ Animation arrêtée', 'success');
+  } catch (err) {
+    handleAnimationError(err);
+  }
+}
+
+/** Effet courant du registre (null si statique/inconnu). */
+function currentEffect() {
+  if (!state.lighting.mode || state.lighting.mode === 'static') return null;
+  return state.effects.find((e) => e.id === state.lighting.mode) || null;
+}
+
+/** Rend les paramètres de l'effet courant (spec générique du registre :
+    type float → slider borné, type int → input number). */
+function renderAnimationParams() {
+  const wrap = document.getElementById('anim-params-wrap');
+  const host = document.getElementById('anim-params');
+  if (!wrap || !host) return;
+  const effect = currentEffect();
+  const specs = effect && Array.isArray(effect.params) ? effect.params : [];
+  if (!specs.length) {
+    wrap.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  wrap.hidden = false;
+  // Même effet déjà rendu : mettre à jour en place (ne pas remplacer les
+  // nœuds pendant qu'un slider est manipulé).
+  const sameStructure = host.dataset.effect === effect.id
+    && host.querySelectorAll('input[data-param-id]').length === specs.length;
+  if (sameStructure) {
+    specs.forEach((spec) => {
+      const input = host.querySelector('input[data-param-id="'
+        + CSS.escape(spec.id) + '"]');
+      if (!input || input === document.activeElement) return;
+      const current = state.lighting.params[spec.id];
+      const next = String(current !== undefined ? current : spec.default);
+      if (input.value !== next) input.value = next;
+      const valueEl = input.parentElement
+        ? input.parentElement.querySelector('b') : null;
+      if (valueEl) valueEl.textContent = formatParamValue(spec, current);
+    });
+    return;
+  }
+  host.dataset.effect = effect.id;
+  host.innerHTML = '';
+  specs.forEach((spec) => {
+    const row = document.createElement('div');
+    row.className = 'slider-row';
+    const label = document.createElement('label');
+    const name = document.createElement('span');
+    name.textContent = spec.label || spec.id;
+    const value = document.createElement('b');
+    value.textContent = formatParamValue(spec, state.lighting.params[spec.id]);
+    label.appendChild(name);
+    label.appendChild(value);
+    const input = document.createElement('input');
+    input.dataset.paramId = spec.id;
+    if (spec.type === 'int') {
+      input.type = 'number';
+      input.step = '1';
+    } else {
+      input.type = 'range';
+      input.step = (Number(spec.max) - Number(spec.min) <= 2) ? '0.01' : '0.1';
+    }
+    if (spec.min !== undefined) input.min = String(spec.min);
+    if (spec.max !== undefined) input.max = String(spec.max);
+    const current = state.lighting.params[spec.id];
+    input.value = String(current !== undefined ? current : spec.default);
+    input.addEventListener('input', () => onAnimationParamInput(spec, input, value));
+    // Relâcher le slider applique immédiatement (avant un éventuel Save).
+    input.addEventListener('change', flushAnimationParams);
+    row.appendChild(label);
+    row.appendChild(input);
+    host.appendChild(row);
+  });
+}
+
+/** Valeur formatée d'un paramètre (2 décimales si plage étroite). */
+function formatParamValue(spec, value) {
+  const v = value !== undefined && value !== null ? value : spec.default;
+  if (spec.type === 'int') return String(v);
+  const num = Number(v);
+  if (!isFinite(num)) return String(v);
+  return (Number(spec.max) - Number(spec.min) <= 2)
+    ? num.toFixed(2) : num.toFixed(1);
+}
+
+function onAnimationParamInput(spec, input, valueEl) {
+  let v = spec.type === 'int' ? parseInt(input.value, 10) : parseFloat(input.value);
+  if (!isFinite(v)) v = spec.default;
+  if (spec.min !== undefined) v = Math.max(Number(spec.min), v);
+  if (spec.max !== undefined) v = Math.min(Number(spec.max), v);
+  state.lighting.params[spec.id] = v;
+  valueEl.textContent = formatParamValue(spec, v);
+  scheduleDirtyUpdate();
+  scheduleAnimationParams();
 }
 
 /** Ré-hydratation complète après Cancel (ou resync multi-onglet) :
@@ -2117,104 +2419,70 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // ── Mode classique / matrice ──
-  let matrixMode = false;
-
-  document.getElementById('btn-toggle-mode').addEventListener('click', () => {
-    matrixMode = !matrixMode;
+  // Bascule purement visuelle du canvas ; l'état est resynchronisé au boot
+  // (si une animation est reprise, refreshAnimationState repasse en matrice).
+  setMatrixMode = function (on) {
+    matrixMode = !!on;
     const btn = document.getElementById('btn-toggle-mode');
     const indicator = document.getElementById('mode-indicator');
+    if (btn) btn.textContent = matrixMode ? '⊞' : '⊟';
+    if (indicator) {
+      indicator.textContent = matrixMode ? 'Mode matrice' : 'Mode classique';
+      indicator.className = matrixMode ? 'badge matrix' : 'badge';
+    }
+    if (canvasEl) canvasEl.style.cursor = matrixMode ? 'default' : 'pointer';
+    ledCanvas.setOrientation(matrixMode ? 'matrix'
+      : (state.lastOrientation || 'vertical'));
+  };
 
-    if (matrixMode) {
-      btn.textContent = '⊞';
-      indicator.textContent = 'Mode matrice';
-      indicator.className = 'badge matrix';
-      canvasEl.style.cursor = 'default';
-      ledCanvas.setOrientation('matrix');
-    } else {
-      // Arrêter l'animation si elle tourne
-      apiFetch('/animation/stop', { method: 'POST' }).catch(() => {});
-      document.getElementById('btn-anim-start').disabled = false;
-      document.getElementById('btn-anim-stop').disabled = true;
-
-      btn.textContent = '⊟';
-      indicator.textContent = 'Mode classique';
-      indicator.className = 'badge';
-      canvasEl.style.cursor = 'pointer';
-      ledCanvas.setOrientation(state.lastOrientation || 'vertical');
+  document.getElementById('btn-toggle-mode').addEventListener('click', () => {
+    const next = !matrixMode;
+    setMatrixMode(next);
+    if (!next) {
+      // Mode matrice OFF : l'éclairage repasse RÉELLEMENT au repos (état + UI).
+      if (state.lighting.running) {
+        stopAnimation();
+      } else {
+        updateAnimationButtons();
+        scheduleDirtyUpdate();
+      }
     }
   });
 
   // ── Animation ──
-  async function startAnimation(effect, label) {
-    const speed = parseFloat(document.getElementById('anim-speed').value);
-    const framerate = 30;
+  // Les boutons de mode viennent de GET /api/animation/effects
+  // (renderAnimationModes) : plus aucun mode codé en dur. Le bouton Stop
+  // reste disponible et n'est actif que moteur en marche.
+  document.getElementById('btn-anim-stop').addEventListener('click', stopAnimation);
 
-    // Forcer le mode matrice
-    if (!matrixMode) {
-      document.getElementById('btn-toggle-mode').click();
-    }
-
-    try {
-      await apiFetch('/animation/start', {
-        method: 'POST',
-        body: { effect, speed, framerate }
-      });
-      state.animationRunning = true;
-      state.animationEffect = effect;
-      updateAnimationButtons();
+  // ── Vitesse / refresh : pilotage EN TEMPS RÉEL via /animation/update ──
+  const animSpeedEl = document.getElementById('anim-speed');
+  if (animSpeedEl) {
+    animSpeedEl.addEventListener('input', (e) => {
+      const speed = parseFloat(e.target.value);
+      if (!isFinite(speed)) return;
+      state.lighting.speed = speed;
+      document.getElementById('anim-speed-value').textContent = speed.toFixed(1) + '×';
+      updateAnimationCycleLabel();  // estimation immédiate (base / vitesse)
       scheduleDirtyUpdate();
-      toast(label + ' démarrée', 'success');
-    } catch (err) {
-      toast('⚠ Erreur démarrage animation: ' + err.message, 'error');
-    }
+      scheduleAnimationSettings();
+    });
+    // Relâcher le slider applique immédiatement (avant un éventuel Save).
+    animSpeedEl.addEventListener('change', flushAnimationSettings);
   }
 
-  document.getElementById('btn-anim-start').addEventListener('click', () => startAnimation('incandescence', '🔥 Incandescence'));
-  document.getElementById('btn-anim-rainbow').addEventListener('click', () => startAnimation('rainbow', '🌈 Rainbow'));
-
-  document.getElementById('btn-anim-stop').addEventListener('click', async () => {
-    try {
-      await apiFetch('/animation/stop', { method: 'POST' });
-      state.animationRunning = false;
-      state.animationEffect = null;
-      updateAnimationButtons();
+  const animRefreshEl = document.getElementById('anim-refresh');
+  if (animRefreshEl) {
+    animRefreshEl.addEventListener('input', (e) => {
+      const rate = parseInt(e.target.value, 10);
+      if (!isFinite(rate)) return;
+      state.lighting.refresh = rate;
+      document.getElementById('anim-refresh-value').textContent = rate + '/s';
       scheduleDirtyUpdate();
-      toast('⏹ Animation arrêtée', 'success');
-    } catch (err) {
-      toast('⚠ Erreur: ' + err.message, 'error');
-    }
-  });
-
-  // ── Vitesse ──
-  document.getElementById('anim-speed').addEventListener('input', async (e) => {
-    const speed = parseFloat(e.target.value);
-    document.getElementById('anim-speed-value').textContent = speed.toFixed(2) + '×';
-    scheduleDirtyUpdate();
-
-    try {
-      await apiFetch('/animation/speed', {
-        method: 'POST',
-        body: { speed }
-      });
-    } catch (err) {
-      // Silencieux
-    }
-  });
-
-  document.getElementById('anim-refresh').addEventListener('input', async (e) => {
-    const rate = parseInt(e.target.value);
-    document.getElementById('anim-refresh-value').textContent = rate + '/s';
-    scheduleDirtyUpdate();
-
-    try {
-      await apiFetch('/animation/refresh', {
-        method: 'POST',
-        body: { rate }
-      });
-    } catch (err) {
-      // Silencieux
-    }
-  });
+      scheduleAnimationSettings();
+    });
+    animRefreshEl.addEventListener('change', flushAnimationSettings);
+  }
 
   // ── Bouton bascule orientation ─────────────────
   const toggleOrientationBtn = document.getElementById('toggle-orientation');
@@ -2237,8 +2505,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     resetAllBtn.disabled = true;
     try {
       for (const stick of state.sticks) {
-        const black = Array(stick.num_leds).fill([0, 0, 0]);
-        state.colors[stick.id] = black;
+        const black = Array(stick.num_leds).fill(null).map(() => [0, 0, 0]);
+        state.baseColors[stick.id] = black;
+        state.colors[stick.id] = black.map((c) => c.slice());
         if (ws && ws.readyState === WebSocket.OPEN) {
           sendWS({
             type: 'set_all_leds',
@@ -2274,6 +2543,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             brightness: s.brightness ?? 255,
           }));
           state.colors = {};
+          state.baseColors = {};
           state.selected = null;
           state.selected_stick = null;
           state.notify();
@@ -2287,12 +2557,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       rescanBtn.textContent = '🔄 Re-scan';
     }
   });
-
-  // ── Bouton Update ───────────────────────────────
-  const updateBtn = document.getElementById('btn-update');
-  if (updateBtn) {
-    updateBtn.addEventListener('click', performUpdate);
-  }
 
   // ── Onglets ────────────────────────────────────────────
   document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -2391,9 +2655,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   await initConnection();
 
   // ── Référence persistée + hydratation des contrôles ─
-  // (l'ordre compte : la référence d'abord, puis l'état courant serveur,
-  // pour que le dirty initial compare des valeurs réelles)
-  await loadSavedReference();
+  // (l'ordre compte : la référence d'abord — avec adoption de `lighting`
+  // pour éviter un faux dirty au boot — puis le catalogue d'effets, puis
+  // l'état courant serveur, pour que le dirty initial compare des valeurs
+  // réelles ; le boot serveur a déjà rechargé `lighting`.)
+  await loadSavedReference({ adoptLighting: true });
+  await loadAnimationEffects();
   await hydrateKrakenControls();
   krakenUpdateIntervalLabel();
   await loadPendingChanges();

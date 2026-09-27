@@ -1,9 +1,11 @@
 /**
- * Assertions du harnais BxRGB (?test=1|save|save2|kraken|kraken-empty|themes).
+ * Assertions du harnais BxRGB (?test=1|save|save2|kraken|kraken-empty|themes|anim|anim2).
  * Injecté en <head> par server.js AVANT app.js pour :
  *   - collecter les erreurs JS dès le premier script ;
  *   - capter le log « Ballistix RGB Controller prêt » (window.__appReady).
  * Le résultat final est écrit dans <pre id="__result"> (dump-dom).
+ * anim : hot-swap des modes, dirty/Save/Cancel avec animation, vitesse en
+ * temps réel, gestion du 400. anim2 : « F5 », réhydratation sans faux dirty.
  */
 (function () {
   'use strict';
@@ -397,9 +399,219 @@
     }
   }
 
+  /* ═══ ?test=anim — refonte du sous-système animations (étape D) ═══ */
+  async function suiteAnim() {
+    // Catalogue dynamique : la source est GET /api/animation/effects.
+    const loaded = await waitFor(() =>
+      document.querySelectorAll('#anim-modes .anim-mode-btn').length >= 2, 6000);
+    check('boutons de mode générés depuis /animation/effects', loaded);
+    const incBtn = document.querySelector('#anim-modes .anim-mode-btn[data-mode="incandescence"]');
+    const rainbowBtn = document.querySelector('#anim-modes .anim-mode-btn[data-mode="rainbow"]');
+    const fakeBtn = document.querySelector('#anim-modes .anim-mode-btn[data-mode="pulse_fake"]');
+    check('libellés issus du registre (Incandescence / Rainbow)',
+      !!incBtn && !!rainbowBtn && incBtn.textContent === 'Incandescence' &&
+      rainbowBtn.textContent === 'Rainbow',
+      incBtn && incBtn.textContent + '|' + (rainbowBtn && rainbowBtn.textContent));
+    check('catalogue test : effet factice présent (?anim=fake)', !!fakeBtn);
+    check('repos : Stop désactivé', document.getElementById('btn-anim-stop').disabled === true);
+    check('repos : aucun mode actif',
+      document.querySelectorAll('#anim-modes .anim-mode-btn.active').length === 0);
+
+    // 1) Démarrage incandescence.
+    incBtn.click();
+    await waitFor(() => document.getElementById('btn-anim-stop').disabled === false, 5000);
+    let st = await stats();
+    let starts = calls(st, '/api/animation/start');
+    check('démarrage → POST /animation/start', starts.length >= 1);
+    check('start porte mode=incandescence',
+      !!starts[0] && starts[0].body.mode === 'incandescence',
+      JSON.stringify(starts[0] && starts[0].body));
+    check('start porte le framerate du status (24, non codé en dur)',
+      !!starts[0] && Number(starts[0].body.framerate) === 24,
+      starts[0] && starts[0].body.framerate);
+    check('incandescence active (aria-pressed)',
+      incBtn.getAttribute('aria-pressed') === 'true');
+    check('libellé dirty exact « Éclairage : Statique → Incandescence (en marche) »',
+      await waitFor(() => document.getElementById('dirty-badge').title.indexOf(
+        'Éclairage : Statique → Incandescence (en marche)') !== -1, 2500),
+      document.getElementById('dirty-badge').title);
+    check('moteur en marche : Stop actif',
+      document.getElementById('btn-anim-stop').disabled === false);
+    check('paramètres d\'effet rendus (détails visibles)',
+      document.getElementById('anim-params-wrap').hidden === false);
+    check('paramètre cycle_seconds rendu',
+      document.querySelector('#anim-params input[data-param-id="cycle_seconds"]') !== null);
+
+    // Paramètre modifié → hot-swap /start avec params (rendu générique).
+    const paramInput = document.querySelector(
+      '#anim-params input[data-param-id="cycle_seconds"]');
+    if (paramInput) {
+      paramInput.value = '4';
+      paramInput.dispatchEvent(new Event('input', { bubbles: true }));
+      paramInput.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(500);
+      st = await stats();
+      const paramStarts = calls(st, '/api/animation/start').filter((c) =>
+        c.body && c.body.params && Number(c.body.params.cycle_seconds) === 4);
+      check('paramètre d\'effet appliqué à chaud (params.cycle_seconds=4)',
+        paramStarts.length >= 1, 'starts=' + paramStarts.length);
+    } else {
+      check('paramètre d\'effet appliqué à chaud (params.cycle_seconds=4)',
+        false, 'input param absent');
+    }
+
+    // 2) Hot-swap vers Rainbow SANS Stop (symptôme 1).
+    rainbowBtn.click();
+    await waitFor(() => rainbowBtn.getAttribute('aria-pressed') === 'true', 5000);
+    st = await stats();
+    starts = calls(st, '/api/animation/start');
+    check('hot-swap : nouveau /start sans aucun Stop préalable',
+      starts.length >= 2 && calls(st, '/api/animation/stop').length === 0,
+      'starts=' + starts.length);
+    check('hot-swap porte mode=rainbow',
+      !!starts[starts.length - 1] && starts[starts.length - 1].body.mode === 'rainbow',
+      JSON.stringify(starts[starts.length - 1] && starts[starts.length - 1].body));
+    check('rainbow obtient le badge actif',
+      rainbowBtn.getAttribute('aria-pressed') === 'true');
+    check('incandescence perd son badge actif',
+      incBtn.getAttribute('aria-pressed') === 'false');
+    check('boutons de mode jamais désactivés en marche',
+      incBtn.disabled === false && rainbowBtn.disabled === false);
+
+    // 3) Dirty + Save avec l'animation (symptôme 2, décision A).
+    await waitFor(() => document.getElementById('btn-save').disabled === false, 3000);
+    check('animation → Enregistrer actif',
+      document.getElementById('btn-save').disabled === false);
+    const dirtyBadge = document.getElementById('dirty-badge');
+    await waitFor(() => dirtyBadge.title.indexOf('Éclairage') !== -1, 2500);
+    check('item d\'éclairage dans le dirty',
+      dirtyBadge.title.indexOf('Éclairage') !== -1, dirtyBadge.title);
+    await waitFor(() => dirtyBadge.title.indexOf('Rainbow') !== -1 &&
+      dirtyBadge.title.indexOf('en marche') !== -1, 2500);
+    check('libellé « Rainbow … (en marche) »',
+      dirtyBadge.title.indexOf('Rainbow') !== -1 &&
+      dirtyBadge.title.indexOf('en marche') !== -1, dirtyBadge.title);
+    document.getElementById('btn-save').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 6000);
+    check('Save part réellement (POST /api/save)',
+      calls(await stats(), '/api/save').length >= 1);
+    check('après Save : plus de dirty',
+      document.getElementById('btn-save').disabled === true);
+
+    // 4) Vitesse en temps réel + durée de cycle (symptôme 3).
+    const speedEl = document.getElementById('anim-speed');
+    const cycleBefore = document.getElementById('anim-cycle').textContent;
+    check('avant : borne slider conforme backend (0.1–10)',
+      speedEl.min === '0.1' && speedEl.max === '10');
+    const refreshEl = document.getElementById('anim-refresh');
+    check('avant : bornes refresh conformes backend (1–30)',
+      refreshEl.min === '1' && refreshEl.max === '30');
+    speedEl.value = '3';
+    speedEl.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(700);
+    const updates = calls(await stats(), '/api/animation/update');
+    check('slider vitesse → POST /animation/update (temps réel)', updates.length >= 1);
+    check('update porte speed=3',
+      !!updates[updates.length - 1] && Number(updates[updates.length - 1].body.speed) === 3,
+      JSON.stringify(updates[updates.length - 1] && updates[updates.length - 1].body));
+    const cycleText = document.getElementById('anim-cycle').textContent;
+    check('durée de cycle recalculée', cycleText !== cycleBefore, cycleText);
+    check('cycle = 6 s / 3 = « 2,0 s »', cycleText.indexOf('2,0 s') !== -1, cycleText);
+    check('libellé vitesse 3.0×',
+      document.getElementById('anim-speed-value').textContent === '3.0×',
+      document.getElementById('anim-speed-value').textContent);
+    check('modif vitesse → dirty actif',
+      document.getElementById('btn-save').disabled === false);
+
+    // 5) Cancel restaure mode + état + vitesse de la référence.
+    document.getElementById('btn-cancel').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 8000);
+    check('Cancel part réellement (POST /api/restore)',
+      calls(await stats(), '/api/restore').length >= 1);
+    check('Cancel restaure Rainbow en marche',
+      rainbowBtn.getAttribute('aria-pressed') === 'true');
+    check('Cancel restaure la vitesse 1×',
+      document.getElementById('anim-speed').value === '1',
+      document.getElementById('anim-speed').value);
+    check('Cancel restaure le cycle (6,0 s)',
+      document.getElementById('anim-cycle').textContent.indexOf('6,0 s') !== -1,
+      document.getElementById('anim-cycle').textContent);
+
+    // 6) Couleurs éditées PENDANT l'animation : base_colors + dirty.
+    document.querySelectorAll('.dnd-stick')[0].click();
+    await sleep(80);
+    document.querySelector('#quick-colors .quick-color-btn').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === false, 4000);
+    check('couleur éditée en marche → PUT couleurs',
+      calls(await stats(), '/api/sticks/stick_0/colors').length >= 1);
+    check('couleur éditée en marche → dirty couleurs',
+      document.getElementById('dirty-badge').title.indexOf('Couleurs') !== -1,
+      document.getElementById('dirty-badge').title);
+    document.getElementById('btn-cancel').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 8000);
+    check('Cancel restaure aussi les couleurs de base',
+      document.getElementById('btn-save').disabled === true);
+
+    // 7) 400 « mode inconnu » : état inchangé + message clair.
+    fakeBtn.click();
+    const toastFound = await waitFor(() => Array.prototype.some.call(
+      document.querySelectorAll('.holaf-toast__message'),
+      (el) => el.textContent.indexOf('refusé') !== -1), 4000);
+    const toastTexts = Array.prototype.map.call(
+      document.querySelectorAll('.holaf-toast__message'), (el) => el.textContent);
+    check('400 : message d\'erreur clair affiché', toastFound,
+      toastTexts.join(' | '));
+    const fakeStarts = calls(await stats(), '/api/animation/start')
+      .filter((c) => c.body && c.body.mode === 'pulse_fake');
+    check('mode inconnu : la requête part bien (réponse 400)', fakeStarts.length >= 1);
+    check('400 : mode actif inchangé (Rainbow)',
+      rainbowBtn.getAttribute('aria-pressed') === 'true');
+    check('400 : le moteur tourne toujours',
+      document.getElementById('btn-anim-stop').disabled === false);
+
+    // 8) Densité / débordement.
+    check('page sans débordement horizontal',
+      document.documentElement.scrollWidth <= 1440, document.documentElement.scrollWidth);
+  }
+
+  /* ═══ ?test=anim2 — « F5 » : réhydratation, aucun faux dirty ═══ */
+  async function suiteAnim2() {
+    const loaded = await waitFor(() =>
+      document.querySelectorAll('#anim-modes .anim-mode-btn').length >= 2, 6000);
+    check('F5 : catalogue rechargé', loaded);
+    const rainbowBtn = document.querySelector('#anim-modes .anim-mode-btn[data-mode="rainbow"]');
+    await waitFor(() => rainbowBtn &&
+      rainbowBtn.getAttribute('aria-pressed') === 'true', 6000);
+    check('F5 : mode courant réhydraté (Rainbow actif)',
+      !!rainbowBtn && rainbowBtn.getAttribute('aria-pressed') === 'true');
+    check('F5 : moteur repris (Stop actif)',
+      document.getElementById('btn-anim-stop').disabled === false);
+    check('F5 : vue matrice resynchronisée',
+      document.getElementById('mode-indicator').textContent.indexOf('matrice') !== -1,
+      document.getElementById('mode-indicator').textContent);
+    check('F5 : vitesse réhydratée (1×)',
+      document.getElementById('anim-speed').value === '1',
+      document.getElementById('anim-speed').value);
+    check('F5 : cycle affiché (6,0 s)',
+      document.getElementById('anim-cycle').textContent.indexOf('6,0 s') !== -1,
+      document.getElementById('anim-cycle').textContent);
+    check('F5 : paramètres d\'effet rendus',
+      document.getElementById('anim-params-wrap').hidden === false);
+    check('F5 : aucun faux dirty (Enregistrer désactivé)',
+      document.getElementById('btn-save').disabled === true);
+    check('F5 : badge dirty masqué',
+      document.getElementById('dirty-badge').hidden === true);
+    check('F5 : page sans débordement horizontal',
+      document.documentElement.scrollWidth <= 1440,
+      document.documentElement.scrollWidth);
+  }
+
   const suites = { '1': suiteBase, save: suiteSave, save2: suiteSave2,
                    kraken: suiteKraken, 'kraken-empty': suiteKrakenEmpty,
-                   themes: suiteThemes };
+                   themes: suiteThemes, anim: suiteAnim, anim2: suiteAnim2 };
 
   window.addEventListener('load', async () => {
     const ready = await waitFor(() => window.__appReady === true, 15000);

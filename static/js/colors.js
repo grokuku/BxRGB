@@ -235,13 +235,17 @@ function initColorControls(state, sendWS, toast) {
     let r = 255, g = 255, b = 255;
 
     if (state.selected) {
-      const colors = state.colors[state.selected.stick_id];
+      // Couleurs de BASE (state.baseColors) : pendant une animation, les
+      // frames ne polluent pas ce que le picker édite.
+      const colors = (state.baseColors && state.baseColors[state.selected.stick_id])
+        || state.colors[state.selected.stick_id];
       if (colors && colors[state.selected.led_idx]) {
         [r, g, b] = colors[state.selected.led_idx];
       }
       ledInfo.innerHTML = `LED <strong>#${state.selected.led_idx + 1}</strong> — <strong>Barrette #${state.sticks.findIndex(s => s.id === state.selected.stick_id) + 1}</strong>`;
     } else if (state.selected_stick) {
-      const colors = state.colors[state.selected_stick];
+      const colors = (state.baseColors && state.baseColors[state.selected_stick])
+        || state.colors[state.selected_stick];
       if (colors && colors.length > 0) {
         // Moyenne des couleurs du stick pour approximation
         const avg = colors.reduce(

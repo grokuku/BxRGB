@@ -297,6 +297,22 @@ class CrucialStick:
         Passe d'abord en mode STATIC pour désactiver les animations du firmware
         (sinon les couleurs seraient écrasées immédiatement).
 
+        Args:
+            colors: si fourni, remplace les couleurs de base ``self.colors``
+                avant l'envoi. Pour n'envoyer qu'une frame transitoire sans
+                toucher aux couleurs de base, utiliser ``write_colors()``.
+        """
+        if colors is not None:
+            self.colors = list(colors)
+        self.write_colors(self.colors)
+
+    def write_colors(self, colors: List[Tuple[int, int, int]]) -> None:
+        """Écrit des couleurs TRANSITOIRES sur le bus, sans toucher ``self.colors``.
+
+        Utilisé par le moteur d'animation : une frame est éphémère et ne doit
+        JAMAIS écraser les couleurs de base (couche ``base_colors``, seule
+        persistée par POST /api/save).
+
         Envoie 3 blocs de N octets (N = nombre de LEDs) :
           - 0x8300 : canaux rouges
           - 0x8340 : canaux verts
@@ -307,10 +323,13 @@ class CrucialStick:
             self.set_mode_static()
             self._static_mode_set = True
 
-        if colors is not None:
-            self.colors = list(colors)
-
-        cols = self.colors[:self.num_leds]
+        cols: List[Tuple[int, int, int]] = []
+        for color in list(colors)[:self.num_leds]:
+            channels = list(color[:3]) + [0, 0, 0]
+            cols.append(tuple(
+                max(0, min(255, int(channel)))
+                for channel in channels[:3]
+            ))
         # Compléter avec du noir si nécessaire
         while len(cols) < self.num_leds:
             cols.append((0, 0, 0))
