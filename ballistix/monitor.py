@@ -494,14 +494,18 @@ def _get_row_width(y):
 
 
 def _fmt_bytes(n) -> str:
-    """Formate des octets en chaîne lisible."""
+    """Formate des octets en chaîne lisible (valeur absente → ``-`` ASCII).
+
+    Le tiret de remplacement est ASCII : le tiret cadratin ``—`` n'est pas
+    couvert par la police de repli de PIL sur la dalle (carré vide ``.notdef``).
+    """
     if n is None:
-        return "—"
+        return "-"
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
             return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
         n /= 1024
-    return "—"
+    return "-"
 
 
 def _fmt_pair(d) -> str:
@@ -511,11 +515,11 @@ def _fmt_pair(d) -> str:
 
 
 def _fmt_temp(v) -> str:
-    return "—" if v is None else f"{v:.0f}°C"
+    return "-" if v is None else f"{v:.0f}°C"
 
 
 def _fmt_temp_dec(v) -> str:
-    return "—" if v is None else f"{v:.1f}°C"
+    return "-" if v is None else f"{v:.1f}°C"
 
 
 def _time_text(now=None) -> str:
@@ -565,7 +569,7 @@ def _hero_text(stats: dict, metric: str):
     if metric == "liquid":
         return _fmt_temp_dec(stats.get("liquid_temp")).removesuffix("°C"), "°C"
     p = _pct_of(stats, metric)
-    return ("—" if p is None else f"{p:.0f}"), "%"
+    return ("-" if p is None else f"{p:.0f}"), "%"
 
 
 def _cell_value_text(stats: dict, metric: str) -> str:
@@ -579,7 +583,7 @@ def _cell_value_text(stats: dict, metric: str) -> str:
     if metric == "liquid":
         return _fmt_temp_dec(stats.get("liquid_temp"))
     p = _pct_of(stats, metric)
-    return "—" if p is None else f"{p:.0f} %"
+    return "-" if p is None else f"{p:.0f} %"
 
 
 def _fit_cell_font(draw, label: str, value: str, width: float, label_font,
@@ -673,7 +677,8 @@ def _short_mount(mount) -> str:
     segment du chemin (``/root/.config/ballistix`` → ``ballistix``). Le
     montage complet était illisible et, en disposition ``classic``, il
     chevauchait la valeur alignée à droite. Un segment trop long est tronqué
-    avec une ellipse (14 caractères max).
+    avec trois points ASCII (``...``, 14 caractères max) — l'ellipse ``…``
+    est évitée dans le rendu pour ne dépendre que de glyphes sûrs.
     """
     if not mount:
         return "?"
@@ -682,20 +687,23 @@ def _short_mount(mount) -> str:
         return "/"
     segments = [s for s in text.rstrip("/").split("/") if s]
     short = segments[-1] if segments else text
-    return short if len(short) <= 14 else short[:13] + "…"
+    return short if len(short) <= 14 else short[:11] + "..."
 
 
 def _disk_line_render(draw, disk, size, compact):
-    """Segments et largeur totale d'une ligne disque (sans rien dessiner)."""
+    """Segments et largeur totale d'une ligne disque (sans rien dessiner).
+
+    Aucun marqueur n'est dessiné : la puce ``●`` n'est pas couverte par la
+    police de repli de PIL sur la dalle (carré vide ``.notdef``). La ligne
+    commence donc par son libellé court.
+    """
     font = _load_font(size)
-    marker = "●"
     mount = _short_mount(disk.get("mount", "?"))
     pct = disk.get("percent") or 0
     rest = f"  {pct:.0f}%" if compact else f"  {_fmt_pair(disk)} ({pct:.0f}%)"
-    w1 = _text_len(draw, marker, font)
     w2 = _text_len(draw, mount, font)
     w3 = _text_len(draw, rest, font)
-    return marker, mount, rest, font, w1, w2, w3, w1 + 4 + w2 + w3
+    return mount, rest, font, w2, w3, w2 + w3
 
 
 def _disk_line_width(draw, disk, size=None, compact=False) -> float:
@@ -707,7 +715,7 @@ def _disk_line_width(draw, disk, size=None, compact=False) -> float:
 
 def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=None, compact=False,
                     max_width=None):
-    """Ligne disque : marqueur + libellé court en accent, valeurs en texte.
+    """Ligne disque : libellé court en accent, valeurs en texte.
 
     ``compact=True`` n'affiche que le pourcentage (pied de ``rings``, où la
     place est comptée à l'intérieur du cercle). ``max_width`` (optionnel) est
@@ -719,7 +727,7 @@ def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=None, compact=False,
     """
     if size is None:
         size = MIN_READABLE_SIZE
-    marker, mount, rest, font, w1, w2, w3, total = _disk_line_render(
+    mount, rest, font, w2, w3, total = _disk_line_render(
         draw, disk, size, compact)
     if max_width is not None and total > max_width:
         if not compact:
@@ -727,9 +735,8 @@ def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=None, compact=False,
                                    compact=True, max_width=max_width)
         return 0.0
     x = cx - total / 2
-    draw.text((x, y), marker, font=font, fill=pal.accent)
-    draw.text((x + w1 + 4, y), mount, font=font, fill=pal.accent)
-    draw.text((x + w1 + 4 + w2, y), rest, font=font, fill=pal.text)
+    draw.text((x, y), mount, font=font, fill=pal.accent)
+    draw.text((x + w2, y), rest, font=font, fill=pal.text)
     return total
 
 
@@ -738,8 +745,9 @@ def _draw_disk_line(draw, cx, y, disk, pal: Palette, size=None, compact=False,
 def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: str):
     """Liste verticale historique — géométrie conservée, corrections ciblées.
 
-    1. Marquage ``●`` (DejaVu) au lieu des emojis 🌡/🎮/💾/💿 qui ne sont pas
-       dessinables par DejaVuSans-Bold (carrés vides) ;
+    1. Aucun marqueur de ligne ni emoji : les puces ``●``/emojis ne sont pas
+       dessinables par la police de repli de PIL sur la dalle (carrés vides
+       ``.notdef``) — la ligne démarre directement par son libellé ;
     2. largeur de ligne = ``min(chord(y), chord(y+44)) − 4`` : couvre le texte
        ET la jauge, sans plus déborder du cercle sûr (avant : ~6 px de
        dépassement aux coins hauts, jusqu'à 79 pixels hors du cercle) ;
@@ -760,7 +768,7 @@ def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: st
     row_h = 70
     last_bottom = None
 
-    def add_row(label, value_str, percent, marker="●"):
+    def add_row(label, value_str, percent):
         nonlocal y, last_bottom
         # Correction : la largeur doit couvrir TOUTE la ligne (texte
         # y..y+23 puis jauge y+30..y+44), pas seulement y+20.
@@ -773,16 +781,15 @@ def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: st
         # jauge matérialise déjà) — jamais de textes superposés.
         label_w = _text_len(draw, label, f_label)
         value_w = _text_len(draw, value_str, f_value)
-        if 30 + label_w + value_w + 10 > width:
+        if label_w + value_w + 10 > width:
             value_str = "" if percent is None else f"{percent:.0f}%"
             value_w = _text_len(draw, value_str, f_value)
-            if 30 + label_w + value_w + 10 > width:
+            if label_w + value_w + 10 > width:
                 value_str = ""
-        draw.text((x_start, y), marker, font=f_value, fill=pal.accent)
         if value_str:
             _draw_right(draw, x_start + width, y, value_str, f_value, pal.text)
-        draw.text((x_start + 30, y), label, font=f_label, fill=pal.text)
-        _draw_gauge(draw, x_start + 30, y + 30, width - 60, 14, percent, pal)
+        draw.text((x_start, y), label, font=f_label, fill=pal.text)
+        _draw_gauge(draw, x_start, y + 30, width, 14, percent, pal)
         last_bottom = y + 44
         y += row_h
 
