@@ -67,7 +67,7 @@ SAFE_RADIUS = 300                # Zone où le texte est visible
 MIN_READABLE_SIZE = 22
 # Tailles candidates d'une valeur de cellule secondaire, du plus grand au plus
 # petit : on prend la première qui ne chevauche pas le libellé (jamais < plancher).
-CELL_VALUE_SIZES = (40, 36, 32, 28, 24, MIN_READABLE_SIZE)
+CELL_VALUE_SIZES = (52, 48, 44, 40, 36, 32, 28, 24, MIN_READABLE_SIZE)
 
 # ── Palettes ────────────────────────────────────────────────────────
 #
@@ -197,14 +197,24 @@ METRIC_ORDER = ["cpu", "gpu", "ram", "vram", "liquid"]
 # Priorité des héros du grand format : les températures d'abord, le liquide
 # promu automatiquement si CPU ou GPU est désactivé.
 HERO_ORDER = ["cpu", "gpu", "liquid", "ram", "vram"]
-# Nombre maximal d'anneaux et emplacements adaptatifs (composition symétrique).
+# Nombre maximal d'anneaux et géométrie adaptative (composition symétrique).
+#
+# Recalibrage « marges » : les anneaux exploitent désormais la corde du cercle
+# au lieu d'un gabarit fixe r=80/trait 14. Le rayon et le trait augmentent quand
+# il y a peu d'anneaux (1 → r158, 2 → r104, 3 → r88) ; à 4 anneaux (2×2) la
+# contrainte verticale (titre haut + pied bas) borne le rayon, mais les
+# emplacements s'écartent horizontalement pour occuper la largeur disponible.
 MAX_RINGS = 4
-RING_SLOTS = {
-    1: [(320, 320)],
-    2: [(183, 320), (457, 320)],
-    3: [(183, 272), (457, 272), (320, 438)],
-    4: [(183, 268), (457, 268), (183, 432), (457, 432)],
+RING_LAYOUTS = {
+    1: {"slots": [(320, 320)], "radius": 172, "stroke": 30},
+    2: {"slots": [(165, 320), (475, 320)], "radius": 138, "stroke": 28},
+    3: {"slots": [(150, 255), (490, 255), (320, 408)],
+        "radius": 105, "stroke": 26},
+    4: {"slots": [(148, 235), (492, 235), (148, 425), (492, 425)],
+        "radius": 86, "stroke": 16},
 }
+# Emplacements exposés (rétrocompatibilité de l'API ``ring_slot_set``).
+RING_SLOTS = {count: g["slots"] for count, g in RING_LAYOUTS.items()}
 
 
 def hero_metrics(options) -> list:
@@ -601,6 +611,45 @@ def _fit_cell_font(draw, label: str, value: str, width: float, label_font,
     return _load_font(MIN_READABLE_SIZE)
 
 
+def _fit_ring_value(draw, main: str, unit: str, max_width: float, base: int):
+    """Plus grande paire (valeur, unité) qui tient dans un anneau.
+
+    Le rayon effectif de l'anneau grossit avec la place disponible : on en
+    profite pour AGRANDIR la valeur centrale (jamais sous le plancher).
+    """
+    size = base
+    while size > MIN_READABLE_SIZE:
+        fm = _load_font(size)
+        fu = _load_font(max(MIN_READABLE_SIZE, int(size * 0.40)))
+        wm = _text_len(draw, main, fm)
+        wu = _text_len(draw, unit, fu) if unit else 0
+        if wm + (2 + wu if unit else 0) <= max_width:
+            return fm, fu
+        size = int(size * 0.90)
+    return _load_font(MIN_READABLE_SIZE), _load_font(MIN_READABLE_SIZE)
+
+
+def _fit_hero_font(draw, main: str, unit: str, max_width: float, base: int,
+                   unit_ratio: float = 0.40):
+    """Plus grande paire (valeur, unité) de héros tenant dans sa colonne.
+
+    Même doctrine que les cellules : on agrandit tant que la valeur longue
+    (« 47.4 », « 100 ») rentre, sans jamais descendre sous le plancher, pour
+    que deux héros côte à côte ne se chevauchent pas.
+    """
+    size = base
+    while size > MIN_READABLE_SIZE:
+        fm = _load_font(size)
+        fu = _load_font(max(MIN_READABLE_SIZE, int(size * unit_ratio)))
+        wm = _text_len(draw, main, fm)
+        wu = _text_len(draw, unit, fu) if unit else 0
+        if wm + (2 + wu if unit else 0) <= max_width:
+            return fm, fu
+        size = int(size * 0.92)
+    fm = _load_font(MIN_READABLE_SIZE)
+    return fm, fm
+
+
 # ── Helpers de dessin ───────────────────────────────────────────────
 
 def _text_len(draw, s, font):
@@ -827,93 +876,122 @@ def _render_classic(draw, pal: Palette, stats: dict, options: list, now_text: st
 def _render_duo(draw, pal: Palette, stats: dict, options: list, now_text: str):
     """Deux colonnes, valeurs principales XL, secondaires LISIBLES.
 
-    Refonte lisibilité (retour terrain Kraken Z53, dalle 640×640 très dense) :
-    tout est ramené au plancher ``MIN_READABLE_SIZE`` (f22). Les éléments qui
-    ne passaient pas le plancher ont été **supprimés** plutôt que réduits :
+    Recalibrage « marges » (demande utilisateur : « affiché plus gros et plus
+    près du bord, comme le classic ») : la géométrie n'est plus un gabarit fixe
+    recentré, elle est **bornée par la corde du cercle** à chaque bande, donc
+    le contenu s'étend jusqu'à ~293 px du centre (classic : 297 px) au lieu de
+    ~262 px. Corollaire : polices agrandies (titre f32, heure f24, libellé
+    héros f28, héros f88 — f120 pour un héros seul, libellé cellule f24, valeur
+    de cellule jusqu'à f52), jauges plus larges et plus épaisses.
 
-    - la légende « charge 7 % » (f15) et la ligne « échelle 20–50 °C » (f15) ;
-    - les sous-valeurs « 17.8 GB / 31.2 GB » (f15) : RAM/VRAM s'affichent
-      désormais en **grand pourcentage** seul ;
-    - les disques gardent un **libellé court** (``_short_mount``) au lieu du
-      montage complet, et abandonnent la capacité au profit du pourcentage
-      seul quand la ligne complète ne tient plus dans la corde.
+    Le contenu de la refonte lisibilité est conservé à l'identique : aucun
+    emoji/puce, RAM/VRAM en pourcentage seul, libellé disque court
+    (``_short_mount``), repli « % seul » quand la ligne disque complète dépasse
+    la corde, et aucun texte sous ``MIN_READABLE_SIZE`` (f22).
 
     Héros (2 emplacements) : premières métriques actives dans l'ordre
     CPU > GPU > LIQUID > RAM > VRAM (le liquide est promu si CPU/GPU est
-    désactivé). Les secondaires tiennent dans une grille 2×2 (cellule orpheline
-    centrée) ; les disques occupent une bande basse (≤ 1 ligne).
+    désactivé). Un héros seul sans cellule secondaire est centré et agrandi.
+    Les secondaires tiennent dans une grille 2×2 (cellule orpheline centrée) ;
+    les disques occupent une bande basse (≤ 1 ligne).
     """
-    f_title = _load_font(28)
-    f_time = _load_font(MIN_READABLE_SIZE)
-    f_hero_label = _load_font(24)
-    f_hero_main = _load_font(76)
-    f_hero_unit = _load_font(28)
-    f_hero_pct = _load_font(32)
-    f_cell_label = _load_font(MIN_READABLE_SIZE)
+    f_title = _load_font(32)
+    f_time = _load_font(24)
+    f_hero_label = _load_font(28)
+    f_cell_label = _load_font(24)
+    f_disk = _load_font(MIN_READABLE_SIZE)
 
-    _draw_center(draw, CENTER[0], 94, "SYSTEM MONITOR", f_title, pal.accent)
-    _draw_center(draw, CENTER[0], 128, now_text, f_time, pal.text)
+    _draw_center(draw, CENTER[0], 84, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], 118, now_text, f_time, pal.text)
 
     heroes = hero_metrics(options)
     rest = secondary_metrics(options)
     disks = (stats.get("disks") or [])[:1] if "disks" in options else []
 
-    hero_x = {0: 180, 1: 460}
-    for i, metric in enumerate(heroes):
-        cx = CENTER[0] if len(heroes) == 1 else hero_x[i]
-        _draw_center(draw, cx, 166, _metric_label(metric),
+    # ── Bloc héros : largeur = corde du cercle sur toute la hauteur ──
+    # (le haut du libellé est la contrainte la plus forte : on mesure la corde
+    #  au libellé ET au bas de la jauge, on retient la plus étroite).
+    solo = (len(heroes) == 1 and not rest)
+    if solo:
+        label_y, main_y, gauge_y, gauge_h = 214, 258, 402, 24
+        hero_main_size = 120
+    else:
+        label_y, main_y, gauge_y, gauge_h = 160, 192, 296, 18
+        hero_main_size = 88
+    block_bottom = gauge_y + gauge_h
+    avail = min(_get_row_width(label_y), _get_row_width(block_bottom)) - 14
+    gap = 44
+    if len(heroes) >= 2:
+        col_w = max(1.0, (avail - gap) / 2)
+        hero_cx = [CENTER[0] - gap / 2 - col_w / 2,
+                   CENTER[0] + gap / 2 + col_w / 2]
+    else:
+        col_w = avail
+        hero_cx = [CENTER[0]]
+
+    for i, metric in enumerate(heroes[:2]):
+        cx = hero_cx[i]
+        _draw_center(draw, cx, label_y, _metric_label(metric),
                      f_hero_label, pal.accent)
-
         main, unit = _hero_text(stats, metric)
-        unit_font = f_hero_unit if unit == "°C" else f_hero_pct
-        _draw_combo(draw, cx, 196, main, unit, f_hero_main, unit_font, pal.text)
-
+        mfont, ufont = _fit_hero_font(draw, main, unit, col_w - 6,
+                                      hero_main_size)
+        _draw_combo(draw, cx, main_y, main, unit, mfont, ufont, pal.text)
         gauge_p = _gauge_percent(stats, metric)
         if gauge_p is not None:
-            _draw_gauge(draw, cx - 105, 302, 210, 16, gauge_p, pal)
+            _draw_gauge(draw, cx - col_w / 2, gauge_y, col_w, gauge_h,
+                        gauge_p, pal)
 
-    # Séparateur
-    draw.line([(150, 338), (490, 338)], fill=pal.gauge_bg, width=2)
-
-    # Grille secondaire : grand pourcentage, aucune sous-valeur.
-    cols = [(76, 232), (332, 232)]
-    rows = [360, 434]
-    asc_label = f_cell_label.getmetrics()[0]
-    for idx, metric in enumerate(rest[:4]):
-        col, row = idx % 2, idx // 2
-        if idx == len(rest) - 1 and len(rest) % 2 == 1:
-            col = None  # cellule orpheline → centrée
-        x, w = cols[col if col is not None else 0]
-        if col is None:
-            x = CENTER[0] - w / 2
-        yy = rows[row]
-        label = _metric_label(metric)
-        value = _cell_value_text(stats, metric)
-        draw.text((x, yy), label, font=f_cell_label, fill=pal.text)
-        vfont = _fit_cell_font(draw, label, value, w, f_cell_label)
-        _draw_right(draw, x + w, yy + asc_label - vfont.getmetrics()[0],
-                    value, vfont, pal.text)
-        _draw_gauge(draw, x, yy + 46, w, 12, _gauge_percent(stats, metric), pal)
+    # ── Grille secondaire : grand pourcentage, aucune sous-valeur ──
+    if rest:
+        sep_half = min(_get_row_width(334), _get_row_width(336)) / 2 - 30
+        draw.line([(CENTER[0] - sep_half, 334), (CENTER[0] + sep_half, 334)],
+                  fill=pal.gauge_bg, width=2)
+        rows = [356, 430]
+        cell_gauge_h = 14
+        cgap = 28
+        asc_label = f_cell_label.getmetrics()[0]
+        for row_idx, yy in enumerate(rows):
+            # Largeur de rangée bornée par la corde (texte + jauge).
+            row_avail = min(_get_row_width(yy),
+                            _get_row_width(yy + 48 + cell_gauge_h)) - 14
+            cw = max(1.0, (row_avail - cgap) / 2)
+            cells = [m for j, m in enumerate(rest[:4]) if j // 2 == row_idx]
+            for col_idx, metric in enumerate(cells):
+                if len(cells) == 1:
+                    x = CENTER[0] - cw / 2  # cellule orpheline → centrée
+                elif col_idx == 0:
+                    x = CENTER[0] - cgap / 2 - cw
+                else:
+                    x = CENTER[0] + cgap / 2
+                label = _metric_label(metric)
+                value = _cell_value_text(stats, metric)
+                draw.text((x, yy), label, font=f_cell_label, fill=pal.text)
+                vfont = _fit_cell_font(draw, label, value, cw, f_cell_label)
+                _draw_right(draw, x + cw,
+                            yy + asc_label - vfont.getmetrics()[0],
+                            value, vfont, pal.text)
+                _draw_gauge(draw, x, yy + 48, cw, cell_gauge_h,
+                            _gauge_percent(stats, metric), pal)
 
     # Bande disques (libellé court, f22) : corde bornée au bas du texte ;
-    # si la ligne complète « 562.6 GB / 931.2 GB (61%) » ne tient plus, la
+    # si la ligne complète « 562.9 GB / 931.2 GB (61%) » ne tient plus, la
     # forme compacte « ballistix  61% » est dessinée — jamais de police
     # sous le plancher.
-    f_disk = _load_font(MIN_READABLE_SIZE)
     disk_h = _text_height(f_disk)
-    dy = 504
+    dy = 508
     for d in disks:
         limit = min(_get_row_width(dy),
                     _get_row_width(dy + disk_h)) - 4
         _draw_disk_line(draw, CENTER[0], dy, d, pal, size=MIN_READABLE_SIZE,
                         max_width=limit)
-        dy += 24
+        dy += 26
 
 
 # ── Disposition 3 : anneaux de progression ──────────────────────────
 
 def _render_rings(draw, pal: Palette, stats: dict, options: list, now_text: str):
-    """Grille adaptative d'anneaux (r=80, trait 14), valeur au centre.
+    """Grille adaptative d'anneaux, rayon/trait/valeur auto-calibrés.
 
     L'anneau représente la fraction de plage utile : température mappée
     20–90 °C (CPU/GPU), 20–50 °C (liquide), pourcentage direct (RAM/VRAM).
@@ -921,32 +999,43 @@ def _render_rings(draw, pal: Palette, stats: dict, options: list, now_text: str)
     occupent les emplacements ; la 5ᵉ (le liquide en pratique) et les
     disques s'affichent en pied de cercle.
 
-    Refonte lisibilité : le libellé passe de f17 à ``MIN_READABLE_SIZE`` et
-    les sous-valeurs f14 (« charge 42% », « 9.3 GB/16.0 GB ») sont supprimées
-    — sous le plancher, elles n'étaient que du bruit. Les disques du pied
-    n'affichent plus que libellé court + pourcentage (``compact``).
+    Recalibrage « marges » : au lieu du gabarit fixe r=80/trait 14, la
+    géométrie dépend du nombre d'anneaux (``RING_LAYOUTS``) — 1 anneau
+    r158/trait 30, 2 r104/trait 26, 3 r88/trait 24, 4 r80/trait 16 avec
+    emplacements écartés horizontalement — et la valeur centrale est
+    auto-ajustée à l'espace intérieur (f36 → f72 selon le rayon). Le contenu
+    de la refonte lisibilité reste : libellés ≥ f22, sous-valeurs f14
+    supprimées, disques du pied en libellé court + pourcentage (``compact``).
     """
-    f_title = _load_font(26)
+    f_title = _load_font(30)
     f_time = _load_font(MIN_READABLE_SIZE)
-    f_label = _load_font(MIN_READABLE_SIZE)
-    f_main = _load_font(36)
-    f_unit = _load_font(MIN_READABLE_SIZE)
 
-    _draw_center(draw, CENTER[0], 96, "SYSTEM MONITOR", f_title, pal.accent)
-    _draw_center(draw, CENTER[0], 126, now_text, f_time, pal.text)
+    _draw_center(draw, CENTER[0], 84, "SYSTEM MONITOR", f_title, pal.accent)
+    _draw_center(draw, CENTER[0], 118, now_text, f_time, pal.text)
 
     # Emplacements adaptatifs : 1 centré, 2 en ligne, 3 en triangle, 4 en grille.
     rings = ring_metrics(options)
     overflow = ring_overflow_metrics(options)
-    slots = ring_slot_set(len(rings))
+    geom = RING_LAYOUTS.get(len(rings), RING_LAYOUTS[MAX_RINGS])
+    slots = geom["slots"]
+    radius = geom["radius"]
+    stroke = geom["stroke"]
+    inner = radius - stroke / 2
+    label_size = 24 if radius >= 100 else MIN_READABLE_SIZE
+    f_label = _load_font(label_size)
 
     for idx, metric in enumerate(rings):
         cx, cy = slots[idx]
-        _draw_ring(draw, cx, cy, 80, 14, _gauge_percent(stats, metric), pal)
-        _draw_center(draw, cx, cy - 48, _metric_label(metric), f_label, pal.accent)
-
+        _draw_ring(draw, cx, cy, radius, stroke,
+                   _gauge_percent(stats, metric), pal)
+        _draw_center(draw, cx, cy - radius * 0.60, _metric_label(metric),
+                     f_label, pal.accent)
         main, unit = _hero_text(stats, metric)
-        _draw_combo(draw, cx, cy - 14, main, unit, f_main, f_unit, pal.text)
+        base = max(MIN_READABLE_SIZE, int(radius * 0.46))
+        mfont, ufont = _fit_ring_value(draw, main, unit,
+                                       2 * inner * 0.94, base)
+        _draw_combo(draw, cx, cy - radius * 0.18, main, unit,
+                    mfont, ufont, pal.text)
 
     # Pied de cercle : liquide (si pas d'anneau) puis disques en texte.
     footer_y = 524
