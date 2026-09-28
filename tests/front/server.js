@@ -78,6 +78,26 @@ const FAKE_LAYOUTS = Array.from({ length: 3 }, (_, i) => ({
   default: false, is_new: true,
 }));
 
+/* Fuseaux simulés (miroir minimal de GET /api/kraken/timezones).
+   ?tz=empty → catalogue vide (provoque le repli JS côté front). */
+const MOCK_TIMEZONES = [
+  { key: 'Africa/Abidjan', utc_offset: '+00:00', system: false },
+  { key: 'America/Los_Angeles', utc_offset: '-08:00', system: false },
+  { key: 'America/New_York', utc_offset: '-05:00', system: false },
+  { key: 'America/Sao_Paulo', utc_offset: '-03:00', system: false },
+  { key: 'Asia/Dubai', utc_offset: '+04:00', system: false },
+  { key: 'Asia/Kolkata', utc_offset: '+05:30', system: false },
+  { key: 'Asia/Shanghai', utc_offset: '+08:00', system: false },
+  { key: 'Asia/Tokyo', utc_offset: '+09:00', system: false },
+  { key: 'Australia/Sydney', utc_offset: '+10:00', system: false },
+  { key: 'Europe/Berlin', utc_offset: '+01:00', system: false },
+  { key: 'Europe/London', utc_offset: '+00:00', system: false },
+  { key: 'Europe/Moscow', utc_offset: '+03:00', system: false },
+  { key: 'Europe/Paris', utc_offset: '+01:00', system: false },
+  { key: 'Pacific/Auckland', utc_offset: '+12:00', system: false },
+  { key: 'UTC', utc_offset: '+00:00', system: true },
+];
+
 /* Registre d'effets — miroir minimal de ballistix/effects.py::EFFECTS
    (ids, libellés, params : type/bornes/défauts + paramètre de cycle). */
 const MOCK_EFFECTS = [
@@ -156,11 +176,13 @@ function freshState() {
     lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
     display: { running: false, mode: null, theme: 'data_center',
                palette: 'data_center', layout: 'duo',
+               timezone: null,
                options: ['cpu', 'gpu', 'ram', 'vram', 'disks', 'liquid'],
                interval: 10.0 },
     galleryFiles: [],
     themesParam: '3',
     animParam: null,
+    tzParam: null,
     krakenMode: null,
     apiCalls: [],
     thumbRequests: [],
@@ -186,6 +208,7 @@ function savedPayload(sticks) {
       lcd: { brightness: 80, orientation: 0, mode: 'liquid' },
       display: { mode: null, theme: 'data_center',
                  palette: 'data_center', layout: 'duo',
+                 timezone: null,
                  options: ['cpu', 'gpu', 'ram', 'vram', 'disks', 'liquid'],
                  interval: 10.0 },
     },
@@ -459,8 +482,23 @@ async function handleApi(req, res, u) {
       theme: S.display.palette || S.display.theme,
       palette: S.display.palette,
       layout: S.display.layout,
+      timezone: S.display.timezone,
       options: S.display.options,
       interval: S.display.interval,
+    });
+  }
+  if (p === '/api/kraken/timezones' && req.method === 'GET') {
+    if (S.tzParam === 'empty') {
+      // Base tzdata absente simulée : repli réduit côté front (hint visible).
+      return json(res, 200, { ok: true, timezones: [], count: 0,
+                              fallback: true, system_timezone: 'UTC',
+                              system_offset: '+00:00', error: null });
+    }
+    return json(res, 200, {
+      ok: true, timezones: MOCK_TIMEZONES, count: MOCK_TIMEZONES.length,
+      fallback: false, system_timezone: 'UTC', system_offset: '+00:00',
+      local_option: { key: 'local', label: 'Heure locale du processus' },
+      error: null,
     });
   }
   if (p === '/api/kraken/display/update' && req.method === 'POST') {
@@ -469,6 +507,11 @@ async function handleApi(req, res, u) {
     if (body.palette !== undefined) S.display.palette = body.palette;
     if (body.layout !== undefined) S.display.layout = body.layout;
     if (body.options !== undefined) S.display.options = body.options;
+    if (body.timezone !== undefined) {
+      // Miroir du backend : "local"/"" → null (heure locale du processus).
+      S.display.timezone = (!body.timezone || body.timezone === 'local')
+        ? null : body.timezone;
+    }
     return json(res, 200, Object.assign({ ok: true, restarted: false }, S.display));
   }
   if (p === '/api/kraken/display/stop' && req.method === 'POST') {
@@ -484,6 +527,10 @@ async function handleApi(req, res, u) {
     if (body.layout !== undefined) S.display.layout = body.layout;
     if (body.options !== undefined) S.display.options = body.options;
     if (body.interval !== undefined) S.display.interval = body.interval;
+    if (body.timezone !== undefined) {
+      S.display.timezone = (!body.timezone || body.timezone === 'local')
+        ? null : body.timezone;
+    }
     return json(res, 200, { ok: true });
   }
   if (p === '/api/kraken/gallery/start' && req.method === 'POST') {
@@ -603,6 +650,9 @@ function serveStatic(req, res, u) {
     // Mémorise ?kraken=empty pour /api/kraken/status.
     const krakenParam = u.searchParams.get('kraken');
     if (krakenParam) S.krakenMode = krakenParam;
+    // Mémorise ?tz=empty : catalogue de fuseaux vide (repli front).
+    const tzParam = u.searchParams.get('tz');
+    if (tzParam) S.tzParam = tzParam;
     let html = fs.readFileSync(file, 'utf8');
     html = html.replace('</head>',
       '<script src="/__test.js"></script></head>');

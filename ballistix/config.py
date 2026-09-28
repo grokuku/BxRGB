@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .effects import MODE_IDS, normalize_params
+from .monitor import normalize_timezone
 from .runner import clamp_framerate, clamp_refresh, clamp_speed
 
 CONFIG_DIR = Path.home() / ".config" / "ballistix"
@@ -77,6 +78,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "palette": "data_center",
             # Disposition par défaut : « duo » (grand format 2 colonnes).
             "layout": "duo",        # classic | duo | rings
+            # Fuseau horaire de l'horloge affichée : nom IANA ("Europe/Paris")
+            # ou décalage fixe ("UTC+02:00"). None = heure locale du
+            # processus (comportement historique, aucune migration requise).
+            "timezone": None,
             "options": ["cpu", "gpu", "ram", "vram", "disks", "liquid"],
             "interval": 10.0,      # secondes entre deux mises à jour (ou "asap")
         },
@@ -150,6 +155,15 @@ def load() -> dict:
 
     # Valider/borner la section lumière (défauts sains si absente/corrompue).
     merged["lighting"] = normalize_lighting(merged.get("lighting"))
+
+    # Fuseau horaire de l'horloge LCD : clé absente, vide, "local" ou de type
+    # invalide → None = heure locale du processus (comportement historique).
+    kraken_merged = merged.get("kraken")
+    if isinstance(kraken_merged, dict):
+        display_merged = kraken_merged.get("display")
+        if isinstance(display_merged, dict):
+            display_merged["timezone"] = normalize_timezone(
+                display_merged.get("timezone"))
 
     return merged
 

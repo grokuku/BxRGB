@@ -287,6 +287,24 @@
           <div class="hint" style="margin-top:12px;">Disposition</div>
           <div class="layout-gallery" id="layout-gallery" role="radiogroup" aria-label="Disposition de l'écran LCD"></div>
 
+          <!-- Fuseau de l'horloge : champ libre + <datalist> peuplée depuis
+               GET /api/kraken/timezones (600 entrées IANA = filtrage natif du
+               navigateur). Champ vide = heure locale du processus. La valeur
+               est validée contre le catalogue avant envoi (inconnue → toast,
+               aucune modification). -->
+          <div class="hint" style="margin-top:12px;">Horloge — fuseau horaire</div>
+          <div class="kraken-tz-row">
+            <input id="kraken-tz-input" class="kraken-select kraken-tz-input"
+                   list="kraken-tz-list" type="text" autocomplete="off"
+                   spellcheck="false" placeholder="local · Europe/Paris · UTC+02:00"
+                   aria-label="Fuseau horaire de l'horloge">
+            <button type="button" class="btn btn-icon" id="kraken-tz-reset"
+                    title="Revenir à l'heure locale du processus">⟲</button>
+          </div>
+          <datalist id="kraken-tz-list"></datalist>
+          <div class="hint kraken-tz-status" id="kraken-tz-status">Fuseau : heure locale du processus</div>
+          <div class="hint hidden" id="kraken-tz-hint">Catalogue serveur indisponible — repli sur quelques fuseaux et décalages fixes « UTC±HH:MM ».</div>
+
           <div class="hint" style="margin-top:12px;">Capteurs à afficher</div>
           <div class="sensors">
             <label><input type="checkbox" id="kraken-cpu" checked> 🌡 Température CPU</label>

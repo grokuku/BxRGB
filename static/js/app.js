@@ -808,7 +808,7 @@ function setKrakenControls(enabled) {
    'kraken-btn-image', 'kraken-btn-gif', 'kraken-file-image', 'kraken-file-gif',
    'kraken-file-gallery', 'kraken-btn-gallery-add', 'kraken-btn-preview',
    'kraken-brightness', 'kraken-orientation', 'kraken-interval',
-   'kraken-interval-asap'].forEach(id => {
+   'kraken-interval-asap', 'kraken-tz-input', 'kraken-tz-reset'].forEach(id => {
     const el = document.getElementById(id);
     if (el && id !== 'kraken-btn-stop-display') el.disabled = !enabled;
   });
@@ -1028,6 +1028,161 @@ let krakenControlsEnabled = false;
 const KRAKEN_SENSOR_KEYS = ['cpu', 'gpu', 'ram', 'vram', 'disks', 'liquid'];
 function krakenSensorEl(key) {
   return document.getElementById(key === 'liquid' ? 'kraken-liquid-temp' : 'kraken-' + key);
+}
+
+/* ── Fuseau horaire de l'horloge LCD ─────────────────────
+   Approche retenue : champ texte libre + <datalist> peuplée depuis
+   GET /api/kraken/timezones. Le filtrage natif du navigateur encaisse
+   les ~600 noms IANA sans code de liste custom ; le champ vide vaut
+   « heure locale du processus ». La valeur est validée contre le
+   catalogue AVANT envoi : un nom inconnu est refusé côté front (toast,
+   aucune modification), et le backend re-valide en 400 de toute façon. */
+
+/** Catalogue serveur des fuseaux : [{key, utc_offset}, ...]. */
+let krakenTimezones = [];
+
+/** Repli hors-ligne (endpoint injoignable/vide) : quelques fuseaux usuels. */
+const TZ_FALLBACK = [
+  'UTC', 'Europe/Paris', 'Europe/London', 'America/New_York',
+  'America/Los_Angeles', 'Asia/Tokyo', 'Asia/Shanghai', 'Australia/Sydney',
+  'UTC-05:00', 'UTC+02:00', 'UTC+09:00',
+];
+
+/** Fuseau sélectionné : null = heure locale du processus. */
+let krakenLcdTimezone = null;
+
+/** Réglage canonique : null si absent/vide/"local", sinon le nom nettoyé. */
+function normalizeTimezoneKey(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  if (!v || v.toLowerCase() === 'local') return null;
+  return v;
+}
+
+/** Décalage UTC (« UTC+02:00 ») d'un fuseau, '' si indéterminable.
+    Intl.DateTimeFormat suit DST ; les clés de repli « UTC±HH:MM » sont
+    formatées directement (Intl ne les accepte pas comme timeZone). */
+function timezoneOffsetText(tz) {
+  if (!tz) {
+    const min = new Date().getTimezoneOffset(); // minutes à l'ouest d'UTC
+    const abs = Math.abs(min);
+    return 'UTC' + (min <= 0 ? '+' : '-') +
+      String(Math.floor(abs / 60)).padStart(2, '0') + ':' +
+      String(abs % 60).padStart(2, '0');
+  }
+  const fixed = /^UTC([+-])(\d{2}):(\d{2})$/.exec(tz);
+  if (fixed) return 'UTC' + fixed[1] + fixed[2] + ':' + fixed[3];
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, timeZoneName: 'longOffset',
+    }).formatToParts(new Date());
+    const name = parts.find((p) => p.type === 'timeZoneName');
+    return name ? name.value.replace('GMT', 'UTC') : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/** Heure résultante ("14:32") dans un fuseau, '' si indéterminable. */
+function timezoneClockText(tz) {
+  try {
+    const opts = { hour: '2-digit', minute: '2-digit', hour12: false };
+    if (tz) opts.timeZone = tz;
+    return new Intl.DateTimeFormat('fr-FR', opts).format(new Date());
+  } catch (err) {
+    return '';
+  }
+}
+
+/** Met à jour le libellé « fuseau — UTC±HH:MM — heure affichée ». */
+function updateKrakenTimezoneStatus() {
+  const el = document.getElementById('kraken-tz-status');
+  const input = document.getElementById('kraken-tz-input');
+  // Ne jamais écraser une saisie en cours (ex. catalogue chargé en retard).
+  if (input && document.activeElement !== input &&
+      input.value.trim() !== (krakenLcdTimezone || '')) {
+    input.value = krakenLcdTimezone || '';
+  }
+  if (!el) return;
+  const offset = timezoneOffsetText(krakenLcdTimezone);
+  const clock = timezoneClockText(krakenLcdTimezone);
+  let text = 'Fuseau : ' + (krakenLcdTimezone || 'heure locale du processus');
+  if (offset) text += ' — ' + offset;
+  if (clock) text += ' — ' + clock + ' affiché';
+  el.textContent = text;
+}
+
+/** Sélectionne un fuseau (null = local) : état + champ + statut + dirty. */
+function selectKrakenTimezone(key) {
+  krakenLcdTimezone = normalizeTimezoneKey(key);
+  updateKrakenTimezoneStatus();
+  scheduleDirtyUpdate();
+}
+
+/** Entrées affichées/validées : catalogue serveur, sinon repli local. */
+function krakenTimezoneEntries() {
+  return krakenTimezones.length
+    ? krakenTimezones
+    : TZ_FALLBACK.map((key) => ({ key, utc_offset: '' }));
+}
+
+/** Peuple la <datalist> (catalogue serveur, sinon repli local). */
+function renderKrakenTimezoneOptions() {
+  const list = document.getElementById('kraken-tz-list');
+  if (!list) return;
+  const entries = krakenTimezoneEntries();
+  const localOffset = timezoneOffsetText(null);
+  const options = ['<option value="local">Heure locale du processus' +
+    (localOffset ? ' (' + localOffset + ')' : '') + '</option>'];
+  entries.forEach((entry) => {
+    const label = entry.key + (entry.utc_offset ? ' — UTC' + entry.utc_offset : '');
+    options.push('<option value="' + escapeHtml(entry.key) + '">' +
+      escapeHtml(label) + '</option>');
+  });
+  list.innerHTML = options.join('');
+  const hint = document.getElementById('kraken-tz-hint');
+  if (hint) hint.hidden = krakenTimezones.length > 0;
+}
+
+/** Charge le catalogue des fuseaux (GET /kraken/timezones). */
+async function refreshKrakenTimezones() {
+  if (!document.getElementById('kraken-tz-input')) return;
+  try {
+    const data = await apiFetch('/kraken/timezones');
+    if (data && data.ok && Array.isArray(data.timezones) && data.timezones.length) {
+      krakenTimezones = data.timezones;
+    } else {
+      krakenTimezones = [];
+    }
+  } catch (err) {
+    krakenTimezones = [];
+  }
+  renderKrakenTimezoneOptions();
+  updateKrakenTimezoneStatus();
+}
+
+/** Valide puis applique le fuseau saisi (change/blur) — inconnu refusé. */
+function commitKrakenTimezone() {
+  const input = document.getElementById('kraken-tz-input');
+  if (!input) return;
+  const raw = input.value.trim();
+  if (!raw || raw.toLowerCase() === 'local') {
+    selectKrakenTimezone(null);
+    scheduleKrakenApply();
+    scheduleKrakenPreview();
+    return;
+  }
+  const entries = krakenTimezoneEntries();
+  const match = entries.find((e) => e.key === raw) ||
+    entries.find((e) => e.key.toLowerCase() === raw.toLowerCase());
+  if (!match) {
+    toast('⚠ Fuseau horaire inconnu : ' + raw, 'error');
+    input.value = krakenLcdTimezone || '';
+    return;
+  }
+  selectKrakenTimezone(match.key);
+  scheduleKrakenApply();
+  scheduleKrakenPreview();
 }
 
 /** Lignes décoratives du squelette CSS (repli hors-ligne d'une vignette). */
@@ -1258,14 +1413,15 @@ function selectKrakenLayout(key) {
 
 /**
  * Récupère la configuration actuelle du monitoring.
- * @returns {{palette: string, layout: string, options: string[]}}
+ * @returns {{palette: string, layout: string, options: string[], timezone: string}}
  */
 function getKrakenMonitorConfig() {
   const options = KRAKEN_SENSOR_KEYS.filter((key) => {
     const el = krakenSensorEl(key);
     return !!(el && el.checked);
   });
-  return { palette: krakenLcdPalette, layout: krakenLcdLayout, options };
+  return { palette: krakenLcdPalette, layout: krakenLcdLayout, options,
+           timezone: krakenLcdTimezone || 'local' };
 }
 
 /** Libellé humain d'une cadence (jamais de FPS — contrainte liquidctl). */
@@ -1308,6 +1464,7 @@ function scheduleKrakenApply() {
           palette: config.palette,
           layout: config.layout,
           options: config.options,
+          timezone: config.timezone,
         },
       });
     } catch (err) {
@@ -1326,7 +1483,8 @@ async function krakenStartMonitor() {
         interval: krakenInterval(),
         palette: config.palette,
         layout: config.layout,
-        options: config.options
+        options: config.options,
+        timezone: config.timezone,
       },
     });
     if (data.ok) {
@@ -1387,7 +1545,8 @@ async function krakenPreview(silent = false) {
       body: {
         palette: config.palette,
         layout: config.layout,
-        options: config.options
+        options: config.options,
+        timezone: config.timezone,
       },
     });
     if (data.ok && data.path) {
@@ -1602,6 +1761,7 @@ function normalizeReference(ref) {
         theme: display.theme || display.palette || 'data_center',
         palette: display.palette || display.theme || 'data_center',
         layout: display.layout || 'classic',
+        timezone: normalizeTimezoneKey(display.timezone),
         options: Array.isArray(display.options)
           ? display.options.map(String)
           : ['cpu', 'gpu', 'ram', 'vram', 'disks'],
@@ -1735,6 +1895,11 @@ function computeDirtyItems() {
   }
   if (refLayout !== krakenLcdLayout) {
     items.push(`Disposition LCD : ${refLayout} → ${krakenLcdLayout}`);
+  }
+  const refTimezone = normalizeTimezoneKey(disp.timezone);
+  if (refTimezone !== krakenLcdTimezone) {
+    items.push('Fuseau horaire : ' + (refTimezone || 'local') + ' → ' +
+      (krakenLcdTimezone || 'local'));
   }
   const currentOptions = getKrakenMonitorConfig().options.join(',');
   if (currentOptions !== disp.options.join(',')) items.push('Capteurs LCD');
@@ -1872,6 +2037,7 @@ async function hydrateKrakenControls() {
         selectKrakenPalette(st.palette || st.theme);
       }
       if (st.layout) selectKrakenLayout(st.layout);
+      if (st.timezone !== undefined) selectKrakenTimezone(st.timezone);
       if (Array.isArray(st.options)) {
         KRAKEN_SENSOR_KEYS.forEach((key) => {
           const el = krakenSensorEl(key);
@@ -2640,10 +2806,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   const krakenBtnInit = document.getElementById('kraken-btn-init');
   if (krakenBtnInit) krakenBtnInit.addEventListener('click', krakenInitialize);
 
+  // Fuseau horaire : validation contre le catalogue au commit (change),
+  // application temps réel débouncée + aperçu comme les autres réglages.
+  const krakenTzInput = document.getElementById('kraken-tz-input');
+  if (krakenTzInput) {
+    krakenTzInput.addEventListener('change', commitKrakenTimezone);
+    krakenTzInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); krakenTzInput.blur(); }
+    });
+  }
+  const krakenTzReset = document.getElementById('kraken-tz-reset');
+  if (krakenTzReset) {
+    krakenTzReset.addEventListener('click', () => {
+      selectKrakenTimezone(null);
+      scheduleKrakenApply();
+      scheduleKrakenPreview();
+    });
+  }
+
   // Sélecteurs Palette × Disposition (remplacent l'ancienne galerie de
   // thèmes) — rendus avant le premier démarrage monitoring pour que l'UI
   // reflète la sélection courante.
   renderKrakenCatalog();
+  refreshKrakenTimezones();
 
   // Vérification silencieuse du Kraken au chargement (ne bloque pas l'init)
   refreshKraken();

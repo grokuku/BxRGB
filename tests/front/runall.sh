@@ -66,5 +66,13 @@ PID="$(start_server)"; sleep 0.5
 run_mode "themes=many&test=themes" "themes-12"
 stop_server "$PID"
 
+echo "── Scénario fuseau horaire de l'horloge ──"
+PID="$(start_server)"; sleep 0.5
+run_mode "test=timezone" "timezone"
+stop_server "$PID"
+PID="$(start_server)"; sleep 0.5
+run_mode "tz=empty&test=timezone" "timezone-fallback"
+stop_server "$PID"
+
 if [ "$FAIL" -eq 0 ]; then echo "✅ Tous les scénarios sont verts."; else echo "❌ Au moins un scénario a échoué."; fi
 exit "$FAIL"

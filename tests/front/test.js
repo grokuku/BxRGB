@@ -1,5 +1,5 @@
 /**
- * Assertions du harnais BxRGB (?test=1|save|save2|kraken|kraken-empty|themes|anim|anim2).
+ * Assertions du harnais BxRGB (?test=1|save|save2|kraken|kraken-empty|themes|anim|anim2|timezone).
  * Injecté en <head> par server.js AVANT app.js pour :
  *   - collecter les erreurs JS dès le premier script ;
  *   - capter le log « Ballistix RGB Controller prêt » (window.__appReady).
@@ -609,9 +609,148 @@
       document.documentElement.scrollWidth);
   }
 
+  /* ═══ ?test=timezone — fuseau horaire de l'horloge LCD ═══ */
+  async function suiteTimezone() {
+    const empty = params.get('tz') === 'empty';
+    document.querySelector('.tab-btn[data-tab="kraken"]').click();
+    await waitFor(() =>
+      document.querySelectorAll('#layout-gallery .layout-thumb').length >= 3, 6000);
+
+    const input = document.getElementById('kraken-tz-input');
+    const statusEl = document.getElementById('kraken-tz-status');
+    const datalist = document.getElementById('kraken-tz-list');
+    const options = datalist ? datalist.querySelectorAll('option') : [];
+    check('champ fuseau présent', !!input);
+    check('datalist peuplée (local + fuseaux)', options.length >= 2, options.length);
+    check('option « local » disponible',
+      Array.prototype.some.call(options, (o) => o.value === 'local'));
+    check('statut initial = heure locale du processus',
+      statusEl.textContent.toLowerCase().indexOf('locale du processus') !== -1,
+      statusEl.textContent);
+    if (empty) {
+      // Catalogue serveur vide (tzdata absente) : repli JS + hint visible.
+      check('repli sans catalogue : hint visible',
+        document.getElementById('kraken-tz-hint').hidden === false);
+      check('repli sans catalogue : liste de décalages utilisable',
+        options.length >= 10, options.length);
+    } else {
+      check('Europe/Paris proposé',
+        Array.prototype.some.call(options, (o) => o.value === 'Europe/Paris'));
+      check('décalage UTC affiché dans la liste',
+        Array.prototype.some.call(options, (o) => /UTC[+-]\d{2}:\d{2}/.test(o.textContent)));
+      check('pas de hint quand le catalogue est complet',
+        document.getElementById('kraken-tz-hint').hidden === true);
+    }
+
+    // Sélection → temps réel (débounce 400 ms) + statut + dirty.
+    input.value = 'Europe/Paris';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(900);
+    let updates = calls(await stats(), '/api/kraken/display/update');
+    let last = updates[updates.length - 1];
+    check('display/update porte timezone Europe/Paris',
+      !!last && last.body && last.body.timezone === 'Europe/Paris',
+      last && JSON.stringify(last.body));
+    check('statut affiche le fuseau sélectionné',
+      statusEl.textContent.indexOf('Europe/Paris') !== -1, statusEl.textContent);
+    check('statut affiche le décalage UTC',
+      /UTC[+-]\d{2}:\d{2}/.test(statusEl.textContent), statusEl.textContent);
+    check('statut affiche l\'heure résultante',
+      /\d{2}:\d{2}/.test(statusEl.textContent), statusEl.textContent);
+    check('dirty alimenté après fuseau',
+      document.getElementById('btn-save').disabled === false &&
+      document.getElementById('dirty-badge').hidden === false);
+    check('badge dirty mentionne « Fuseau horaire … → Europe/Paris »',
+      document.getElementById('dirty-badge').title.indexOf('Fuseau horaire') !== -1 &&
+      document.getElementById('dirty-badge').title.indexOf('Europe/Paris') !== -1,
+      document.getElementById('dirty-badge').title);
+
+    // L'aperçu part avec le fuseau → le PNG reflète la nouvelle heure.
+    document.getElementById('kraken-btn-preview').click();
+    await sleep(900);
+    const previews = calls(await stats(), '/api/kraken/monitor/preview');
+    check('aperçu : POST avec le fuseau sélectionné',
+      previews.length >= 1 &&
+      previews[previews.length - 1].body.timezone === 'Europe/Paris');
+    check('aperçu affiché',
+      document.getElementById('kraken-preview-img').classList.contains('hidden') === false);
+
+    // Démarrage monitoring : le fuseau voyage avec les autres réglages.
+    document.getElementById('kraken-btn-monitor').click();
+    await waitFor(() =>
+      document.getElementById('kraken-btn-stop-display').disabled === false, 3000);
+    const starts = calls(await stats(), '/api/kraken/monitor/start');
+    check('monitor/start porte le fuseau',
+      starts.length >= 1 && starts[starts.length - 1].body.timezone === 'Europe/Paris',
+      starts.length && JSON.stringify(starts[starts.length - 1].body));
+
+    // Save fige le fuseau ; un autre fuseau est annulé par Cancel.
+    document.getElementById('btn-save').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 6000);
+    check('save : dirty retombé',
+      document.getElementById('btn-save').disabled === true);
+    input.value = 'Asia/Tokyo';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(900);
+    updates = calls(await stats(), '/api/kraken/display/update');
+    last = updates[updates.length - 1];
+    check('nouveau fuseau → display/update Asia/Tokyo',
+      !!last && last.body.timezone === 'Asia/Tokyo');
+    check('nouveau fuseau → dirty',
+      document.getElementById('btn-save').disabled === false);
+    document.getElementById('btn-cancel').click();
+    await waitFor(() => document.getElementById('btn-save').disabled === true &&
+      document.getElementById('dirty-badge').hidden === true, 8000);
+    check('Cancel restaure le fuseau de la référence',
+      input.value === 'Europe/Paris', input.value);
+    check('Cancel restaure le statut (Europe/Paris)',
+      statusEl.textContent.indexOf('Europe/Paris') !== -1, statusEl.textContent);
+
+    // Bouton ⟲ : retour à l'heure locale du processus.
+    document.getElementById('kraken-tz-reset').click();
+    await sleep(900);
+    updates = calls(await stats(), '/api/kraken/display/update');
+    last = updates[updates.length - 1];
+    check('reset ⟲ → display/update timezone local',
+      !!last && last.body.timezone === 'local',
+      last && JSON.stringify(last.body));
+    check('reset ⟲ → champ vide', input.value === '', input.value);
+    check('reset ⟲ → statut heure locale',
+      statusEl.textContent.toLowerCase().indexOf('locale du processus') !== -1,
+      statusEl.textContent);
+
+    // Nom inconnu : refusé côté front, aucune requête, champ restauré.
+    const beforeKo = calls(await stats(), '/api/kraken/display/update').length;
+    input.value = 'Nope/Nope';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    const toastFound = await waitFor(() => Array.prototype.some.call(
+      document.querySelectorAll('.holaf-toast__message'),
+      (el) => el.textContent.indexOf('inconnu') !== -1), 3000);
+    check('fuseau inconnu → toast d\'erreur', toastFound,
+      Array.prototype.map.call(document.querySelectorAll('.holaf-toast__message'),
+        (el) => el.textContent).join(' | '));
+    check('fuseau inconnu → champ restauré', input.value === '', input.value);
+    await sleep(600);
+    check('fuseau inconnu → aucune requête display/update',
+      calls(await stats(), '/api/kraken/display/update').length === beforeKo,
+      calls(await stats(), '/api/kraken/display/update').length + ' vs ' + beforeKo);
+
+    // Fin propre : la référence (Europe/Paris) revient.
+    document.getElementById('btn-cancel').click();
+    await waitFor(() => input.value === 'Europe/Paris' &&
+      document.getElementById('btn-save').disabled === true, 8000);
+    check('fin : fuseau de référence restauré', input.value === 'Europe/Paris', input.value);
+    document.getElementById('kraken-btn-stop-display').click();
+
+    check('page sans débordement horizontal',
+      document.documentElement.scrollWidth <= 1440, document.documentElement.scrollWidth);
+  }
+
   const suites = { '1': suiteBase, save: suiteSave, save2: suiteSave2,
                    kraken: suiteKraken, 'kraken-empty': suiteKrakenEmpty,
-                   themes: suiteThemes, anim: suiteAnim, anim2: suiteAnim2 };
+                   themes: suiteThemes, anim: suiteAnim, anim2: suiteAnim2,
+                   timezone: suiteTimezone };
 
   window.addEventListener('load', async () => {
     const ready = await waitFor(() => window.__appReady === true, 15000);

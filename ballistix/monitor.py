@@ -14,6 +14,11 @@ Modèle de rendu : **palette × disposition × capteurs**.
     - **Capteurs** (``options``, 6 entrées) : cases à cocher CPU/GPU/RAM/
       VRAM/disques/liquide.
 
+L'heure affichée par les 3 dispositions suit un **fuseau horaire** optionnel
+(``timezone``) — nom IANA via :mod:`zoneinfo`, décalage fixe ``UTC±HH:MM`` en
+secours, repli silencieux sur l'heure locale du processus (voir
+:func:`resolve_timezone`).
+
 Un seul point d'entrée : :func:`render_monitoring_image`.
 
 Rétrocompatibilité : l'ancien paramètre ``theme_name`` (3ᵉ positionnel) est
@@ -32,10 +37,21 @@ import math
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import timezone as _datetime_timezone
 from pathlib import Path
 
 # ── Dépendances optionnelles ────────────────────────────────────────
+
+try:
+    # Python ≥ 3.9 : fuseaux IANA de la stdlib (base tzdata du système).
+    from zoneinfo import ZoneInfo
+    from zoneinfo import available_timezones as _zoneinfo_available_timezones
+    ZONEINFO_AVAILABLE = True
+except ImportError:  # pragma: no cover - Python < 3.9 / build exotique
+    ZoneInfo = None
+    _zoneinfo_available_timezones = None
+    ZONEINFO_AVAILABLE = False
 
 try:
     import psutil
@@ -532,12 +548,229 @@ def _fmt_temp_dec(v) -> str:
     return "-" if v is None else f"{v:.1f}°C"
 
 
-def _time_text(now=None) -> str:
-    """Heure ``HH:MM:SS`` à afficher (figée si ``now`` fourni)."""
+# ── Fuseaux horaires de l'horloge ───────────────────────────────────
+#
+# L'heure affichée sur la dalle peut suivre un fuseau explicite
+# (``kraken.display.timezone``) : nom IANA (``Europe/Paris``) via zoneinfo,
+# ou décalage fixe ASCII (``UTC+02:00``, ``GMT-5``) quand la base tzdata
+# est absente. La conversion est refaite À CHAQUE RENDU (``datetime.now(tz)``)
+# : une bascule heure d'été / heure d'hiver est donc suivie sans redémarrage.
+# Aucun mode d'échec : fuseau absent, inconnu, type invalide ou zoneinfo
+# indisponible → repli silencieux sur l'heure locale du processus.
+
+TIMEZONE_LOCAL = "local"
+LOCAL_TIMEZONE_LABEL = "Heure locale du processus"
+
+# Réglage fixe « UTC±HH:MM » (secours sans tzdata, ou volontairement sans DST).
+_FIXED_TZ_RE = re.compile(r"^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$")
+
+# Liste réduite de décalages fixes (repli sans tzdata) : couvre les
+# principaux fuseaux du monde, du plus à l'ouest au plus à l'est.
+FALLBACK_TIMEZONE_OFFSETS = (
+    -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5,
+    5.5, 6, 7, 8, 9, 9.5, 10, 11, 12, 13, 14,
+)
+
+# Cache des ``tzinfo`` résolus (le rendu peut appeler _time_text souvent).
+_TZ_CACHE = {}
+
+
+def _fixed_offset_timezone(name):
+    """``tzinfo`` à décalage fixe depuis « UTC+02:00 » (None si non reconnu)."""
+    match = _FIXED_TZ_RE.match(name)
+    if not match:
+        return None
+    sign, hours, minutes = match.groups()
+    try:
+        delta = timedelta(hours=int(hours), minutes=int(minutes or 0))
+    except (TypeError, ValueError):
+        return None
+    if sign == "-":
+        delta = -delta
+    try:
+        return _datetime_timezone(delta, name)
+    except (ValueError, OverflowError):
+        return None
+
+
+def resolve_timezone(name):
+    """``tzinfo`` d'un nom de fuseau, ou None (absent/inconnu/tzdata absente).
+
+    Accepte un nom IANA (``Europe/Paris``) via :mod:`zoneinfo`, ou un
+    décalage fixe ASCII (``UTC+02:00``, ``GMT-5``). Ne lève JAMAIS : le
+    rendu retombe sur l'heure locale du processus quand le résultat est None.
+    """
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name:
+        return None
+    if name in _TZ_CACHE:
+        return _TZ_CACHE[name]
+    tz = None
+    # UTC/GMT sans base tzdata : objet à décalage nul.
+    if not ZONEINFO_AVAILABLE and name.upper() in ("UTC", "GMT"):
+        tz = _datetime_timezone(timedelta(0), name)
+    if tz is None and ZONEINFO_AVAILABLE:
+        try:
+            tz = ZoneInfo(name)
+        except Exception:
+            tz = None
+    if tz is None:
+        tz = _fixed_offset_timezone(name)
+    _TZ_CACHE[name] = tz
+    return tz
+
+
+def normalize_timezone(value):
+    """Réglage canonique : ``None`` = heure locale du processus.
+
+    ``None``, ``""`` et ``"local"`` (insensible à la casse) → ``None`` ;
+    toute autre chaîne est renvoyée nettoyée (sa résolution est du ressort
+    de :func:`resolve_timezone`, qui retombe sur l'heure locale).
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or value.lower() == TIMEZONE_LOCAL:
+        return None
+    return value
+
+
+def _format_utc_offset(offset) -> str:
+    """``timedelta`` → « +02:00 » (chaîne vide si indéterminable)."""
+    if offset is None:
+        return ""
+    try:
+        total = int(offset.total_seconds())
+    except Exception:
+        return ""
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    hours, minutes = divmod(total // 60, 60)
+    return f"{sign}{hours:02d}:{minutes:02d}"
+
+
+def utc_offset_text(tz) -> str:
+    """Décalage UTC courant d'un fuseau (« +02:00 »), "" si inconnu.
+
+    ``tz=None`` = fuseau local du processus. Le décalage est relu à chaque
+    appel (il suit donc DST pour un fuseau IANA).
+    """
+    try:
+        if tz is None:
+            return _format_utc_offset(datetime.now().astimezone().utcoffset())
+        return _format_utc_offset(datetime.now(tz).utcoffset())
+    except Exception:
+        return ""
+
+
+def system_timezone() -> dict:
+    """Fuseau du processus : ``{name, offset}`` (name None si indétectable).
+
+    Ordre de détection : variable ``TZ``, ``/etc/timezone`` (Debian),
+    lien ``/etc/localtime`` → ``.../zoneinfo/<nom>``. Une lecture ratée
+    rend simplement un nom None (le décalage local reste calculé).
+    """
+    candidates = []
+    tz_env = os.environ.get("TZ")
+    if tz_env:
+        candidates.append(tz_env.strip())
+    try:
+        with open("/etc/timezone") as f:
+            candidates.append(f.read().strip())
+    except OSError:
+        pass
+    try:
+        link = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in link:
+            candidates.append(link.split(marker, 1)[1])
+    except OSError:
+        pass
+    name = None
+    tz = None
+    for candidate in candidates:
+        if candidate and resolve_timezone(candidate) is not None:
+            name = candidate
+            tz = resolve_timezone(candidate)
+            break
+    return {"name": name, "offset": utc_offset_text(tz)}
+
+
+def list_timezones() -> dict:
+    """Catalogue des fuseaux pour l'API ``GET /api/kraken/timezones``.
+
+    - ``timezones`` : liste IANA TRIÉE (``zoneinfo.available_timezones()``),
+      chaque entrée ``{key, utc_offset, system}`` (décalage relu maintenant) ;
+    - ``fallback`` : True si la base tzdata est absente → liste réduite de
+      décalages fixes « UTC±HH:MM » directement utilisables par le rendu ;
+    - ``system_timezone`` / ``system_offset`` : fuseau du processus, exposé
+      même s'il n'apparaît pas dans la liste.
+    """
+    system = system_timezone()
+    fallback = not ZONEINFO_AVAILABLE
+    names = []
+    if not fallback:
+        try:
+            names = sorted(_zoneinfo_available_timezones())
+        except Exception:
+            names = []
+        if not names:
+            fallback = True
+
+    zones = []
+    if fallback:
+        for hours in FALLBACK_TIMEZONE_OFFSETS:
+            sign = "+" if hours >= 0 else "-"
+            whole = int(abs(hours))
+            minutes = int(round((abs(hours) - whole) * 60))
+            key = f"UTC{sign}{whole:02d}:{minutes:02d}"
+            zones.append({"key": key, "utc_offset": f"{sign}{whole:02d}:{minutes:02d}",
+                          "system": key == system["name"]})
+    else:
+        for name in names:
+            zones.append({"key": name,
+                          "utc_offset": utc_offset_text(resolve_timezone(name)),
+                          "system": name == system["name"]})
+
+    return {
+        "timezones": zones,
+        "count": len(zones),
+        "fallback": fallback,
+        "system_timezone": system["name"],
+        "system_offset": system["offset"],
+    }
+
+
+def _time_text(now=None, timezone=None) -> str:
+    """Heure ``HH:MM:SS`` à afficher (figée si ``now`` fourni).
+
+    ``timezone`` (nom IANA ou décalage fixe) est appliqué à CHAQUE appel :
+    ``now`` absent → ``datetime.now(tz)`` (DST suivie à chaud) ; ``now``
+    conscient d'un fuseau → instant converti ; ``now`` naïf → interprété
+    comme heure locale puis converti ; ``now`` chaîne → non convertible,
+    rendu tel quel. Fuseau invalide/absent ⇒ heure locale, jamais d'erreur.
+    """
+    tz = resolve_timezone(normalize_timezone(timezone))
+    if tz is None:
+        if now is None:
+            return time.strftime("%H:%M:%S")
+        if hasattr(now, "strftime"):
+            return now.strftime("%H:%M:%S")
+        return str(now)
     if now is None:
-        return time.strftime("%H:%M:%S")
+        try:
+            return datetime.now(tz).strftime("%H:%M:%S")
+        except Exception:
+            return time.strftime("%H:%M:%S")
     if hasattr(now, "strftime"):
-        return now.strftime("%H:%M:%S")
+        if not hasattr(now, "astimezone"):
+            return now.strftime("%H:%M:%S")
+        try:
+            return now.astimezone(tz).strftime("%H:%M:%S")
+        except Exception:
+            return now.strftime("%H:%M:%S")
     return str(now)
 
 
@@ -1078,7 +1311,7 @@ DEFAULT_OPTIONS = ["cpu", "gpu", "ram", "vram", "disks", "liquid"]
 def render_monitoring_image(stats: dict, output_path: str,
                             theme_name: str = None, options: list = None,
                             now=None, palette: str = None,
-                            layout: str = None) -> bool:
+                            layout: str = None, timezone: str = None) -> bool:
     """Génère l'image 640×640 de monitoring (palette × disposition).
 
     Args:
@@ -1093,6 +1326,9 @@ def render_monitoring_image(stats: dict, output_path: str,
         layout: Clé de disposition (``LAYOUTS``). Par défaut ``DEFAULT_LAYOUT``
             (« duo ») pour un nouveau rendu, sauf en mode rétrocompatible
             ``theme_name`` où l'on conserve « classic ».
+        timezone: Fuseau de l'heure affichée (nom IANA ou ``UTC±HH:MM``).
+            None/absent/invalide → heure locale du processus ; les vignettes
+            passent ``now=THUMB_NOW`` sans fuseau, leur rendu reste identique.
 
     Un appel positionnel de style ``(stats, path, palette, layout, options,
     now)`` est également reconnu (le 3ᵉ argument est une palette connue et le
@@ -1119,7 +1355,7 @@ def render_monitoring_image(stats: dict, output_path: str,
 
     img = Image.new("RGB", SCREEN_SIZE, pal.bg)
     draw = ImageDraw.Draw(img)
-    RENDERERS[layout](draw, pal, stats, list(options), _time_text(now))
+    RENDERERS[layout](draw, pal, stats, list(options), _time_text(now, timezone))
 
     try:
         img.save(output_path, "PNG")

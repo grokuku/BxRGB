@@ -78,10 +78,17 @@ _settings = {
         "theme": "data_center",    # miroir historique de `palette`
         "palette": "data_center",  # data_center | overclock | fluid_flow | graphite | amber
         "layout": "duo",           # classic | duo | rings (défaut : grand format)
+        # Fuseau de l'horloge rendue : nom IANA ou décalage fixe ;
+        # None = heure locale du processus (défaut historique).
+        "timezone": None,
         "options": list(DEFAULT_OPTIONS),
         "interval": DEFAULT_INTERVAL,
     },
 }
+
+# Sentinelle de paramètre « conserver le fuseau courant » — distincte de
+# ``None``, qui signifie « revenir à l'heure locale du processus ».
+KEEP_TIMEZONE = object()
 
 # ── Threads d'affichage (monitoring / gallery) ──────────────────────
 
@@ -131,6 +138,8 @@ def kraken_update_settings(lcd: dict = None, display: dict = None) -> dict:
                 disp["theme"] = disp["palette"]
             if "layout" not in disp:
                 disp["layout"] = "duo"
+            if "timezone" not in disp:
+                disp["timezone"] = None
     return kraken_get_settings()
 
 
@@ -1157,12 +1166,13 @@ def kraken_gallery_start(interval: float = DEFAULT_INTERVAL) -> dict:
     return {"ok": True, "message": f"Diaporama démarré ({len(files)} fichier(s), {_interval_label(interval)})"}
 
 
-def _render_monitor_frame(stats, path, palette, layout, options, now=None) -> bool:
-    """Appelle le moteur de rendu (palette × disposition).
+def _render_monitor_frame(stats, path, palette, layout, options, now=None,
+                          timezone=None) -> bool:
+    """Appelle le moteur de rendu (palette × disposition × fuseau).
 
     Un test peut remplacer ``render_monitoring_image`` par un faux de
     l'ANCIENNE signature (``theme_name`` positionnel) : on adapte l'appel
-    selon les paramètres réellement exposés.
+    selon les paramètres réellement exposés (``timezone`` inclus).
     """
     from .monitor import render_monitoring_image
     try:
@@ -1170,21 +1180,32 @@ def _render_monitor_frame(stats, path, palette, layout, options, now=None) -> bo
     except (TypeError, ValueError):
         params = {}
     if "layout" in params and "palette" in params:
+        kwargs = {"timezone": timezone} if "timezone" in params else {}
         return render_monitoring_image(
-            stats, path, options=options, now=now, palette=palette, layout=layout
+            stats, path, options=options, now=now, palette=palette,
+            layout=layout, **kwargs
         )
     return render_monitoring_image(stats, path, palette, options)
 
 
+def _normalize_timezone(value):
+    """Fuseau reçu (None = heure locale) — jamais d'exception."""
+    from .monitor import normalize_timezone
+    return normalize_timezone(value)
+
+
 def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = None,
                          options: list = None, palette: str = None,
-                         layout: str = None) -> dict:
+                         layout: str = None, timezone=KEEP_TIMEZONE) -> dict:
     """Démarre le monitoring : génère une image de stats et l'envoie.
 
     Nécessite Pillow + psutil (module ballistix.monitor). ``interval``
     accepte la sentinelle ``"asap"`` (aucune attente entre deux images).
-    Le rendu combine ``palette`` × ``layout`` × ``options`` ; l'ancien
-    paramètre ``theme`` reste accepté (→ palette, layout inchangé).
+    Le rendu combine ``palette`` × ``layout`` × ``options`` × ``timezone`` ;
+    l'ancien paramètre ``theme`` reste accepté (→ palette, layout inchangé).
+    ``timezone=KEEP_TIMEZONE`` conserve le fuseau mémorisé ; ``None`` le
+    réinitialise à l'heure locale du processus. Le fuseau est appliqué à
+    chaque rendu (bascule DST suivie à chaud).
     """
     try:
         from .monitor import collect_system_stats, monitor_available
@@ -1198,6 +1219,8 @@ def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = None,
         current = dict(_settings["display"])
     new_palette = palette or theme or current.get("palette") or "data_center"
     new_layout = layout or current.get("layout") or "duo"
+    new_timezone = (current.get("timezone") if timezone is KEEP_TIMEZONE
+                    else _normalize_timezone(timezone))
     interval = normalize_interval(interval)
     options = _normalize_options(options)
     screen_path = str(_store_dir() / "monitor.png")
@@ -1214,7 +1237,8 @@ def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = None,
             except Exception:
                 pass
             if _render_monitor_frame(stats, screen_path, new_palette,
-                                     new_layout, options):
+                                     new_layout, options,
+                                     timezone=new_timezone):
                 kraken_set_lcd_image(screen_path, animated=False)
             # Date-butoir : le rendu + le push liquidctl sont décomptés.
             elapsed = time.monotonic() - cycle_start
@@ -1226,6 +1250,7 @@ def kraken_monitor_start(interval: float = DEFAULT_INTERVAL, theme: str = None,
         "theme": new_palette,
         "palette": new_palette,
         "layout": new_layout,
+        "timezone": new_timezone,
         "options": options,
         "interval": interval,
     })
@@ -1241,13 +1266,16 @@ def _interval_label(interval) -> str:
 
 
 def kraken_display_reconfigure(interval=None, theme=None, options=None,
-                               palette=None, layout=None) -> dict:
+                               palette=None, layout=None,
+                               timezone=KEEP_TIMEZONE) -> dict:
     """Applique en TEMPS RÉEL des réglages d'affichage (sans changer de mode).
 
     l'état mémoire est toujours mis à jour (palette/disposition/capteurs/
-    intervalle) : c'est lui que POST /api/save fige dans la référence. Si un
-    thread d'affichage tourne, il est RELANCÉ avec les nouveaux paramètres
-    (le dé-bounce ~400 ms est fait côté front pour éviter la rafale).
+    intervalle/fuseau) : c'est lui que POST /api/save fige dans la référence.
+    Si un thread d'affichage tourne, il est RELANCÉ avec les nouveaux
+    paramètres (le dé-bounce ~400 ms est fait côté front pour éviter la
+    rafale). ``timezone=KEEP_TIMEZONE`` conserve le fuseau mémorisé ;
+    ``None``/``"local"`` le réinitialise à l'heure locale du processus.
 
     Returns:
         L'état d'affichage résultant + ``restarted`` (thread relancé ?).
@@ -1264,11 +1292,14 @@ def kraken_display_reconfigure(interval=None, theme=None, options=None,
     new_options = (_normalize_options(options)
                    if options is not None
                    else list(current.get("options") or DEFAULT_OPTIONS))
+    new_timezone = (current.get("timezone") if timezone is KEEP_TIMEZONE
+                    else _normalize_timezone(timezone))
 
     kraken_update_settings(display={
         "theme": new_palette,
         "palette": new_palette,
         "layout": new_layout,
+        "timezone": new_timezone,
         "options": new_options,
         "interval": new_interval,
     })
@@ -1277,7 +1308,8 @@ def kraken_display_reconfigure(interval=None, theme=None, options=None,
     restarted = False
     if running and mode == "monitor":
         res = kraken_monitor_start(new_interval, palette=new_palette,
-                                   layout=new_layout, options=new_options)
+                                   layout=new_layout, options=new_options,
+                                   timezone=new_timezone)
         restarted = bool(res.get("ok"))
     elif running and mode == "gallery":
         res = kraken_gallery_start(new_interval)
@@ -1321,11 +1353,13 @@ def kraken_pending_changes() -> dict:
 
 
 def kraken_monitor_preview(theme: str = None, options: list = None,
-                           palette: str = None, layout: str = None) -> dict:
+                           palette: str = None, layout: str = None,
+                           timezone=KEEP_TIMEZONE) -> dict:
     """Génère une image de monitoring de test (pour l'aperçu web).
 
-    Combine ``palette`` × ``layout`` × ``options`` (le rendu de la
-    combinaison courante). L'ancien paramètre ``theme`` reste accepté.
+    Combine ``palette`` × ``layout`` × ``options`` × ``timezone`` (le rendu
+    de la combinaison courante — l'aperçu reflète donc l'heure du fuseau
+    sélectionné). L'ancien paramètre ``theme`` reste accepté.
 
     Retourne {"ok": bool, "path": str|None, "error": str|None}.
     """
@@ -1341,12 +1375,15 @@ def kraken_monitor_preview(theme: str = None, options: list = None,
             current = dict(_settings["display"])
         new_palette = palette or theme or current.get("palette") or "data_center"
         new_layout = layout or current.get("layout") or "duo"
+        new_timezone = (current.get("timezone") if timezone is KEEP_TIMEZONE
+                        else _normalize_timezone(timezone))
         stats = collect_system_stats()
         s = kraken_status()
         if s["ok"] and s["data"].get("liquid_temperature") is not None:
             stats["liquid_temp"] = s["data"]["liquid_temperature"]
         path = str(_store_dir() / "monitor_preview.png")
-        ok = _render_monitor_frame(stats, path, new_palette, new_layout, options)
+        ok = _render_monitor_frame(stats, path, new_palette, new_layout, options,
+                                   timezone=new_timezone)
         return {"ok": ok, "path": path if ok else None,
                 "error": None if ok else "Rendu impossible"}
     except Exception as e:

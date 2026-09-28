@@ -43,6 +43,7 @@ from .kraken import (
     kraken_get_settings, kraken_update_settings, kraken_display_status,
     kraken_display_reconfigure, kraken_pending_changes,
     kraken_commit_file_changes, kraken_restore_file_changes,
+    KEEP_TIMEZONE,
 )
 
 # ── Version du daemon (exposée par GET /api/status) ──────────
@@ -134,6 +135,7 @@ def _restore_kraken_hardware(lcd: dict, display: dict) -> None:
                 palette=display.get("palette"),
                 layout=display.get("layout"),
                 options=display.get("options"),
+                timezone=display.get("timezone"),
             )
         elif mode == "gallery":
             kraken_gallery_start(display.get("interval", 10.0))
@@ -1377,13 +1379,36 @@ class KrakenDisplayBody(BaseModel):
 
     ``interval`` : nombre de secondes (2-60) ou la sentinelle ``"asap"``
     (« le plus souvent possible »). Le rendu combine ``palette`` ×
-    ``layout`` ; ``theme`` reste accepté (alias historique de palette).
+    ``layout`` × ``timezone`` ; ``theme`` reste accepté (alias historique
+    de palette). ``timezone`` : nom IANA (``Europe/Paris``), décalage fixe
+    (``UTC+02:00``) ou ``"local"``/``""`` pour l'heure locale du processus ;
+    absent (= null) → réglage courant conservé ; nom inconnu → 400.
     """
     interval: Union[float, str] = 10.0
     theme: Optional[str] = None
     palette: Optional[str] = None
     layout: Optional[str] = None
     options: Optional[List[str]] = None
+    timezone: Optional[str] = None
+
+
+def _requested_timezone(value: Optional[str]):
+    """Fuseau demandé par un POST, validé avant toute modification d'état.
+
+    Retourne ``KEEP_TIMEZONE`` si le corps ne porte pas de fuseau (null),
+    ``None`` pour « heure locale du processus » (``""``/``"local"``),
+    sinon le nom résolu (nom IANA ou décalage fixe). Un nom inconnu lève
+    une HTTPException 400 SANS toucher au réglage courant.
+    """
+    if value is None:
+        return KEEP_TIMEZONE
+    from .monitor import normalize_timezone, resolve_timezone
+    normalized = normalize_timezone(value)
+    if normalized is None:
+        return None
+    if resolve_timezone(normalized) is None:
+        raise HTTPException(400, f"Fuseau horaire inconnu : {value!r}")
+    return normalized
 
 
 @app.get("/api/kraken/gallery")
@@ -1425,6 +1450,7 @@ async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
         palette=body.palette,
         layout=body.layout,
         options=body.options,
+        timezone=_requested_timezone(body.timezone),
     )
 
 
@@ -1432,10 +1458,10 @@ async def kraken_monitor_start_endpoint(body: KrakenDisplayBody):
 async def kraken_display_update_endpoint(body: KrakenDisplayBody):
     """Applique en temps réel des réglages d'affichage (sans changer de mode).
 
-    Met à jour palette/disposition/capteurs/intervalle et RELANCE le thread
-    monitoring (ou gallery) s'il tourne déjà. Appelé par le front à chaque
-    sélection de palette/disposition, coche de capteur ou changement
-    d'intervalle (débouncé).
+    Met à jour palette/disposition/capteurs/intervalle/fuseau et RELANCE le
+    thread monitoring (ou gallery) s'il tourne déjà. Appelé par le front à
+    chaque sélection de palette/disposition, coche de capteur, changement
+    d'intervalle ou de fuseau horaire (débouncé).
     """
     return kraken_display_reconfigure(
         interval=body.interval,
@@ -1443,7 +1469,28 @@ async def kraken_display_update_endpoint(body: KrakenDisplayBody):
         palette=body.palette,
         layout=body.layout,
         options=body.options,
+        timezone=_requested_timezone(body.timezone),
     )
+
+
+@app.get("/api/kraken/timezones")
+async def kraken_timezones_endpoint():
+    """Catalogue des fuseaux horaires de l'horloge LCD (source : monitor.py).
+
+    Liste IANA triée (``zoneinfo.available_timezones()``) avec décalage UTC
+    courant, marquage du fuseau du processus et repli en décalages fixes
+    ``UTC±HH:MM`` si la base tzdata est absente (``fallback=true``).
+    """
+    try:
+        from .monitor import list_timezones
+    except ImportError:
+        return {"ok": False, "timezones": [], "count": 0, "fallback": False,
+                "system_timezone": None, "system_offset": None,
+                "error": "Module de monitoring indisponible"}
+    data = list_timezones()
+    data["ok"] = True
+    data["error"] = None
+    return data
 
 
 @app.get("/api/kraken/pending")
@@ -1489,6 +1536,8 @@ async def kraken_themes_endpoint():
         "count": len(themes),
         "palette_count": len(palettes),
         "layout_count": len(layouts),
+        "timezone": kraken_get_settings()["display"].get("timezone"),
+        "timezones_endpoint": "/api/kraken/timezones",
         "preview_endpoint": "/api/kraken/monitor/preview",
         "preview_image": "/api/kraken/monitor/preview.png",
         "error": None,
@@ -1566,6 +1615,7 @@ async def kraken_monitor_preview_endpoint(body: KrakenDisplayBody = None):
         palette=body.palette,
         layout=body.layout,
         options=body.options,
+        timezone=_requested_timezone(body.timezone),
     )
 
 

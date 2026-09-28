@@ -22,7 +22,7 @@ La suite est verte si la dernière ligne affiche
 Dépendances : **Node** (mock) et **Chromium** headless (`/usr/bin/chromium`
 par défaut, surchargeable via `CHROMIUM=/chemin/chromium`).
 
-## Scénarios — 9 au total, 182 checks
+## Scénarios — 11 au total, 243 checks
 
 | Scénario | Requête URL | Checks |
 |---|---|---|
@@ -35,7 +35,9 @@ par défaut, surchargeable via `CHROMIUM=/chemin/chromium`).
 | `anim2` | `?test=anim2` | 12/12 |
 | `themes-5` | `?test=themes` | 25/25 |
 | `themes-12` | `?themes=many&test=themes` | 26/26 |
-| **Total** | | **182** |
+| `timezone` | `?test=timezone` | 31/31 |
+| `timezone-fallback` | `?tz=empty&test=timezone` | 30/30 |
+| **Total** | | **243** |
 
 Les paires `save → save2` et `anim → anim2` partagent volontairement le **même
 serveur mock** : le second scénario simule un « F5 » après le premier et vérifie
@@ -46,9 +48,9 @@ démarrent un serveur neuf.
 
 | Fichier | Rôle |
 |---|---|
-| `runall.sh` | Lance les 9 scénarios sur des serveurs mock (partagés pour `save/save2` et `anim/anim2`, neufs sinon). |
-| `server.js` | Serveur mock : `static/` + API `/api/*` + injection de `test.js`. La racine BxRGB est déduite de `tests/front/` (surcharge : `BXRGB_DIR`). |
-| `test.js` | Assertions injectées (`?test=1|save|save2|kraken|kraken-empty|themes|anim|anim2`), résultat dans `<pre id="__result">`. |
+| `runall.sh` | Lance les 11 scénarios sur des serveurs mock (partagés pour `save/save2` et `anim/anim2`, neufs sinon). |
+| `server.js` | Serveur mock : `static/` + API `/api/*` + injection de `test.js`. La racine BxRGB est déduite de `tests/front/` (surcharge : `BXRGB_DIR`). `?tz=empty` simule une base tzdata absente (catalogue de fuseaux vide → repli front). |
+| `test.js` | Assertions injectées (`?test=1|save|save2|kraken|kraken-empty|themes|anim|anim2|timezone`), résultat dans `<pre id="__result">`. |
 | `extract.py` | Extrait et résume ce JSON depuis le `--dump-dom` de Chromium. |
 | `screenshots.sh` | Captures 1440×900 des sélecteurs palette/disposition (5 / 12 palettes) pour revue visuelle. |
 | `make_fixtures.py` | Génère les PNG de `fixtures/` avec le **vrai moteur PIL** (`ballistix/monitor.py`) : vignettes de palette (5 réelles + 7 factices) et de disposition (3 réelles + 3 factices). |
