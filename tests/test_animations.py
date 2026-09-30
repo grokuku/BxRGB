@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from ballistix import config, effects, kraken, server
+from ballistix import config, effects, kraken, monitor, server
 from ballistix.runner import EffectRunner
 
 # ═══════════════════════════════════════════════════════════════
@@ -957,6 +957,174 @@ def test_boot_without_running_reference_stays_static(anim, monkeypatch):
         assert status["refresh"] == 5.0
         saved = client.get("/api/saved").json()
         assert saved["lighting"]["speed"] == 4.0
+
+
+# ── Reprise au démarrage : monitoring LCD Kraken (bug « écran figé ») ──
+#
+# Bug signalé : après un redémarrage du container, l'écran LCD restait figé
+# jusqu'à un clic manuel sur « Monitor ». Cause : le lifespan alignait l'état
+# MÉMOIRE Kraken mais ne relançait pas la BOUCLE d'affichage alors que le mode
+# actif (monitor/gallery) est persisté dans config.kraken.display.mode.
+
+def _save_kraken_display(display: dict) -> None:
+    cfg = config.load()
+    cfg["kraken"]["display"].update(display)
+    config.save(cfg)
+
+
+def test_boot_resumes_kraken_monitor_from_display_mode(anim, monkeypatch):
+    """Config kraken.display.mode="monitor" → monitoring REPRIS au démarrage."""
+    if not monitor.monitor_available():
+        pytest.skip("Pillow/psutil indisponibles")
+    _save_kraken_display({
+        "mode": "monitor",
+        "theme": "overclock",
+        "palette": "overclock",
+        "layout": "rings",
+        "timezone": "Europe/Paris",
+        "options": ["cpu", "ram"],
+        "interval": 30.0,
+    })
+
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+
+    with TestClient(server.app) as client:
+        status = client.get("/api/kraken/display/status").json()
+        assert status["running"] is True, "monitoring non repris au démarrage"
+        assert status["mode"] == "monitor"
+        assert status["palette"] == "overclock"
+        assert status["layout"] == "rings"
+        assert status["timezone"] == "Europe/Paris"
+        assert status["options"] == ["cpu", "ram"]
+        assert status["interval"] == 30.0
+
+    # Après le lifespan, le thread est bien arrêté (pas de fuite).
+    assert kraken._display_thread_status()["running"] is False
+
+
+def test_boot_does_not_start_kraken_monitor_when_inactive(anim, monkeypatch):
+    """Config kraken.display.mode=None → aucun thread, réglages quand même chargés."""
+    if not monitor.monitor_available():
+        pytest.skip("Pillow/psutil indisponibles")
+    _save_kraken_display({
+        "mode": None, "theme": "graphite", "palette": "graphite",
+        "layout": "classic", "options": ["cpu"], "interval": 5.0,
+    })
+
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+
+    with TestClient(server.app) as client:
+        status = client.get("/api/kraken/display/status").json()
+        assert status["running"] is False
+        assert status["mode"] is None
+        assert status["palette"] == "graphite"
+        assert status["layout"] == "classic"
+        assert status["interval"] == 5.0
+
+    assert kraken._display_thread_status()["running"] is False
+
+
+def test_boot_after_save_with_monitor_active_resumes(anim, monkeypatch):
+    """Scénario utilisateur : Monitor → Save → « redémarrage container ». """
+    if not monitor.monitor_available():
+        pytest.skip("Pillow/psutil indisponibles")
+
+    # 1) Session « avant redémarrage » : on démarre le monitoring puis Save.
+    client = anim.client  # TestClient sans `with` : lifespan non relancé
+    assert client.post("/api/kraken/monitor/start", json={
+        "interval": 60, "palette": "overclock", "layout": "rings",
+        "options": ["cpu", "ram"], "timezone": "Europe/Paris",
+    }).json()["ok"]
+    assert client.post("/api/save").status_code == 200
+    # L'arrêt « courant » n'est PAS la référence : le Save a figé monitor.
+    assert client.post("/api/kraken/display/stop").json()["ok"]
+    assert client.get("/api/kraken/display/status").json()["mode"] is None
+
+    # 2) « Redémarrage container » : nouveau lifespan sur la même config.
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+    with TestClient(server.app) as c2:
+        status = c2.get("/api/kraken/display/status").json()
+        assert status["running"] is True, "monitoring non repris après Save"
+        assert status["mode"] == "monitor"
+        assert status["palette"] == "overclock"
+        assert status["layout"] == "rings"
+        assert status["options"] == ["cpu", "ram"]
+        assert status["timezone"] == "Europe/Paris"
+        assert status["interval"] == 60.0
+
+    assert kraken._display_thread_status()["running"] is False
+
+
+def test_boot_resumes_kraken_gallery_from_display_mode(anim, monkeypatch):
+    """Config kraken.display.mode="gallery" → le diaporama est REPRIS au boot."""
+    _save_kraken_display({"mode": "gallery", "interval": 15.0})
+    monkeypatch.setattr(
+        kraken, "kraken_gallery_list",
+        lambda: {"files": [{"name": "a.png", "is_gif": False}],
+                 "count": 1, "deleted": [], "error": None})
+
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+
+    with TestClient(server.app) as client:
+        status = client.get("/api/kraken/display/status").json()
+        assert status["running"] is True, "diaporama non repris au démarrage"
+        assert status["mode"] == "gallery"
+        assert status["interval"] == 15.0
+
+    assert kraken._display_thread_status()["running"] is False
+
+
+def test_boot_fresh_config_starts_nothing(anim, monkeypatch):
+    """Config vierge (aucune référence) : pas de monitoring, pas de crash."""
+    assert not config.CONFIG_FILE.exists()
+
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+
+    with TestClient(server.app) as client:
+        status = client.get("/api/kraken/display/status").json()
+        assert status["running"] is False
+        assert status["mode"] is None
+        assert client.get("/api/animation/status").json()["running"] is False
+
+    assert kraken._display_thread_status()["running"] is False
+
+
+def test_boot_resumes_led_animation_and_kraken_monitor_together(anim, monkeypatch):
+    """Les DEUX boucles reprennent ensemble au démarrage (LED + LCD)."""
+    if not monitor.monitor_available():
+        pytest.skip("Pillow/psutil indisponibles")
+    cfg = config.load()
+    cfg["lighting"] = {"mode": "rainbow", "running": True, "speed": 2.0,
+                       "framerate": 30, "refresh": 10,
+                       "params": {"period_seconds": 6.0, "hue_spread": 1.0}}
+    cfg["kraken"]["display"].update({"mode": "monitor", "palette": "amber",
+                                      "layout": "duo", "interval": 20.0})
+    config.save(cfg)
+
+    new_sticks = [FakeStick(0, 0x30)]
+    monkeypatch.setattr(server, "detect_sticks", lambda: new_sticks)
+
+    with TestClient(server.app) as client:
+        # LED : moteur relancé et frames réellement écrites sur le matériel mocké.
+        anim_status = client.get("/api/animation/status").json()
+        assert anim_status["running"] is True
+        assert anim_status["mode"] == "rainbow"
+        assert _wait_until(lambda: total_frame_writes(new_sticks) > 0)
+
+        # LCD : monitoring relancé avec les réglages persistés.
+        lcd_status = client.get("/api/kraken/display/status").json()
+        assert lcd_status["running"] is True
+        assert lcd_status["mode"] == "monitor"
+        assert lcd_status["palette"] == "amber"
+        assert lcd_status["interval"] == 20.0
+
+    assert server.smbus.animation_runner is None
+    assert kraken._display_thread_status()["running"] is False
 
 
 def test_dead_animation_module_replaced():

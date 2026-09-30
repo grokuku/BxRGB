@@ -940,18 +940,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠ Animation non reprise au démarrage : {e}")
 
-    # Aligner l'état mémoire Kraken sur la référence persistée : liquidctl
-    # ne remonte aucun réglage, la config est notre seule connaissance de
-    # l'état au démarrage.
+    # Restaurer la référence Kraken : liquidctl ne remonte aucun réglage,
+    # la config est notre seule connaissance de l'état au démarrage. On
+    # aligne l'état MÉMOIRE *et* on relance la BOUCLE d'affichage si la
+    # référence dit qu'un mode était actif (monitor/gallery) : sans cela,
+    # l'écran LCD restait figé après un redémarrage jusqu'à un clic manuel
+    # sur « Monitor ». `_restore_kraken_hardware` applique aussi
+    # luminosité/orientation/mode LCD au matériel (best-effort).
     try:
         from .config import load as load_config
         kraken_cfg = load_config().get("kraken") or {}
-        kraken_update_settings(
-            lcd=kraken_cfg.get("lcd"),
-            display=kraken_cfg.get("display"),
-        )
+        lcd = dict(kraken_cfg.get("lcd") or {})
+        display = dict(kraken_cfg.get("display") or {})
+        _restore_kraken_hardware(lcd, display)
+        kraken_update_settings(lcd=lcd, display=display)
+        if display.get("mode") in ("monitor", "gallery"):
+            print(f"▶ Affichage Kraken repris au démarrage : {display['mode']}")
     except Exception as e:
-        print(f"⚠ État Kraken non restauré en mémoire : {e}")
+        print(f"⚠ État Kraken non restauré au démarrage : {e}")
 
     # Ménage du cache de vignettes : les images d'une ancienne empreinte
     # du moteur de rendu ne seront plus jamais servies.
@@ -965,7 +971,14 @@ async def lifespan(app: FastAPI):
         print(f"⚠ Purge des vignettes impossible : {e}")
 
     yield
-    # Cleanup à l'arrêt
+    # Cleanup à l'arrêt : stoppe la boucle d'affichage Kraken (thread daemon
+    # qui pousse des images USB) puis ferme les bus SMBus. La config n'est
+    # PAS modifiée : le mode actif reste persisté pour la reprise au boot.
+    print("🧹 Arrêt de l'affichage Kraken...")
+    try:
+        kraken_stop_display()
+    except Exception as e:
+        print(f"⚠ Arrêt de l'affichage Kraken impossible : {e}")
     print("🧹 Fermeture des bus SMBus...")
     smbus.cleanup()
 
